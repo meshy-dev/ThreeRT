@@ -101,7 +101,7 @@ struct Params {
     size: vec4<u32>,      // width, height, sample index, seed
     counts: vec4<u32>,    // lights, emitters, max bounces, rr depth
     env: vec4<f32>,       // has env map, env width, env height, sun light index (-1 none)
-    misc: vec4<f32>,      // clamp (absolute radiance), the CPU's copy of the emitters' total weight (read from the table: `emitter_totals`), env total weight, _
+    misc: vec4<f32>,      // clamp (absolute radiance), - (the emitters' total weight is their table's: `emitter_totals`), env total weight, _
     sky_color: vec4<f32>, // constant sky radiance when no env map
     counts2: vec4<u32>,   // directional lights (first in `lights`), environment NEE on, output height for texture LOD (0 = traced height), first shadowed local light
     time: vec4<f32>,      // scene time (s), wetness, rain, -
@@ -465,6 +465,12 @@ fn emitter_guide(k: u32) -> u32 {
 // The table's header, after the guide (lib.rs `emitter_header`): x the total weight, y the share of it outside the
 // light tree. Requires counts.y > 0.
 fn emitter_totals() -> vec4<f32> { return emitter_at(P.counts.y + EMITTER_GUIDE / 4u + 1u); }
+
+// Whether the light list has an emitter that weighs something now: counts.y is its size, the total the table's.
+fn emitters_on() -> bool {
+    if (P.counts.y == 0u) { return false; }
+    return emitter_totals().x > 0.0;
+}
 
 // One emitter CDF entry: the first whose cumulative weight is not below u. The guide table bounds the binary search to
 // u's bucket (u * EMITTER_GUIDE is exact for the 24-bit u), which holds the same entry a search over the whole CDF
@@ -2001,7 +2007,7 @@ fn emitter_attrs(em: EmitterTri) -> TriAttr {
 // ray left) over the triangle's area. One it never picks (no entry, no weight: switched off, culled, a procedural
 // surface) is the BSDF ray's alone.
 fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
-    if (is_proc(hit) || !has(F_INST) || P.counts.y == 0u) { return 1.0; }
+    if (is_proc(hit) || !has(F_INST) || !emitters_on()) { return 1.0; }
     // The hit triangle's emitter: its index in its section, counted from the section's first entry (its instance's
     // row's; none: it is not light-sampled).
     let rows = instance_at(hit.inst).info.w;
@@ -2471,7 +2477,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     // gpu.rs `KernelSwitches::light_pick`: past the camera hit, the directional lights and one of the other kinds a
     // scene has (local lights, emitters, the sky), weighted by their number.
     @if(light_pick) let has_local = P.counts.x > P.counts2.x;
-    @if(light_pick) let has_emit = P.counts.y > 0u;
+    @if(light_pick) let has_emit = emitters_on();
     @if(light_pick) let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);
     @if(light_pick) var take_local = true;
     @if(light_pick) var take_emit = true;
@@ -2498,7 +2504,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     if (two_sided(lb)) { ne = vec3<f32>(0.0); }
     mis_x = o;
     mis_n = ne;
-    var emitters = P.counts.y;
+    var emitters = select(0u, P.counts.y, emitters_on());
     @if(light_pick) if (!take_emit) { emitters = 0u; }
     if (emitters > 0u) {
         var es: ES;
@@ -2659,7 +2665,7 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32, rd: u32) -
     }
     // One shadow ray: either the local lights (RIS) or one emissive point, chosen with equal odds when both exist.
     let has_l = P.counts.x > P.counts2.x;
-    let has_e = P.counts.y > 0u;
+    let has_e = emitters_on();
     let both = has_l && has_e;
     let use_e = has_e && (!has_l || r2.y < 0.5);
     let wk = select(1.0, 2.0, both);
@@ -3002,7 +3008,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32, rd: u32) -> vec3<f32> {
             if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * tr3(vis) * hg_phase(g, dot(pick_ls.l, d)) * (wsum * f32(nl) / (3.0 * pick_w)); }
         }
     }
-    if (P.counts.y > 0u) {
+    if (emitters_on()) {
         mis_x = x;
         mis_n = vec3<f32>(0.0);
         let es = sample_emitter(x, vec3<f32>(0.0), rng_sub(rd, 0x400u));
@@ -3104,7 +3110,7 @@ fn point_direct(x: vec3<f32>, rd: u32) -> vec3<f32> {
             if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * ph * (wsum * f32(nl) / (3.0 * pick_w)) * tr3(vis); }
         }
     }
-    if (P.counts.y > 0u) {
+    if (emitters_on()) {
         var wsum = 0.0;
         var pick: ES;
         var pick_t = 0.0;

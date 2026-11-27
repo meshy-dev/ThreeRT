@@ -147,7 +147,7 @@ pub struct Params {
     pub motion: [f32; 4],    // live motion vectors: 1 = on; `render --signals`; software traversal's units: the top tree's root, their count (bits)
     /// Light LOD (live; `emitter_lod`): reference position, d0 (0 = off).
     pub light_lod: [f32; 4],
-    /// x: the emitter CDF's total without light LOD (camera-hit MIS weighs by power alone; = misc[1] when it is off);
+    /// x: the emitters' power as the CPU last built their table (not read by the kernel);
     /// y: live emitter cull radius (lib.rs emitter_lod; 0 = off); z: the cull's reach inside the view cone (0 = none).
     pub emit_power: [f32; 4],
     /// Live emitter cull's view cone (lib.rs `EmitterCull`): the forward direction it was built for (xyz), the cosine
@@ -3203,7 +3203,7 @@ impl Gpu {
             let d = &self.device;
             let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("emitter weights"), source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/emitter_weights.wgsl").into()) });
             let buffer = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None };
-            let entries: Vec<_> = (0..10).map(|b| buffer(b, match b { 0 => wgpu::BufferBindingType::Uniform, 7 => wgpu::BufferBindingType::Storage { read_only: true }, _ => wgpu::BufferBindingType::Storage { read_only: false } })).collect();
+            let entries: Vec<_> = (0..5).map(|b| buffer(b, match b { 0 => wgpu::BufferBindingType::Uniform, 2 => wgpu::BufferBindingType::Storage { read_only: true }, _ => wgpu::BufferBindingType::Storage { read_only: false } })).collect();
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("emitter weights"), entries: &entries });
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("emitter weights"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
             let pipes = ["weigh", "scan_a", "scan_b", "scan_c", "guide", "tree", "next", "finish"].map(|name| d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(name), layout: Some(&pl), module: &module, entry_point: Some(name), compilation_options: Default::default(), cache: self.cache() }));
@@ -3226,7 +3226,7 @@ impl Gpu {
         if st.as_ref().is_none_or(|s| s.levels.size() < levels_bytes || s.blocks.size() < blocks_bytes) {
             let make = |label, size: u64, usage| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
             *st = Some(EmitterWeights {
-                params: make("emitter weights", 64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
+                params: make("emitter weights", 96, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
                 levels: make("emitter weights: levels", (levels_bytes + levels_bytes / 2).next_multiple_of(16), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
                 blocks: make("emitter weights: blocks", (blocks_bytes + blocks_bytes / 2).next_multiple_of(16), wgpu::BufferUsages::STORAGE),
                 counts: vec![],
@@ -3252,23 +3252,19 @@ impl Gpu {
             q.write_buffer(&s.levels, 0, bytemuck::bytes_of(&0u32));
         }
         let f = |v: f32| v.to_bits();
-        let params: [u32; 16] = [n, nodes as u32, stride, (lod[3] > 0.0) as u32, f(lod[0]), f(lod[1]), f(lod[2]), f(lod[3]), f(cull.radius), f(cull.far), f(cull.cos), 0, f(cull.dir[0]), f(cull.dir[1]), f(cull.dir[2]), 0];
+        let (heap, words) = (&up.heap, &up.words);
+        let at = |t: Table| (heap.at(t) / 16) as u32;
+        let params: [u32; 24] = [
+            n, nodes as u32, stride, (lod[3] > 0.0) as u32,
+            at(Table::EmitterTris), at(Table::Emitters), at(Table::LightTree), at(Table::Instances),
+            at(Table::Materials), at(Table::Objects), (words.at(Stream::Rows) / 4) as u32, 0,
+            f(lod[0]), f(lod[1]), f(lod[2]), f(lod[3]),
+            f(cull.radius), f(cull.far), f(cull.cos), 0,
+            f(cull.dir[0]), f(cull.dir[1]), f(cull.dir[2]), 0,
+        ];
         q.write_buffer(&s.params, 0, bytemuck::cast_slice(&params));
         let (layout, pipes) = self.weigh_pipelines();
-        let (heap, words) = (&up.heap, &up.words);
-        let section = |binding: u32, t: Table| wgpu::BindGroupEntry { binding, resource: heap.binding(t) };
-        let entries = [
-            buffer_entry(0, &s.params),
-            section(1, Table::EmitterTris),
-            section(2, Table::Emitters),
-            section(3, Table::LightTree),
-            section(4, Table::Instances),
-            section(5, Table::Materials),
-            section(6, Table::Objects),
-            wgpu::BindGroupEntry { binding: 7, resource: words.binding(Stream::Rows) },
-            buffer_entry(8, &s.levels),
-            buffer_entry(9, &s.blocks),
-        ];
+        let entries = [buffer_entry(0, &s.params), buffer_entry(1, &heap.buffer), buffer_entry(2, &words.buffer), buffer_entry(3, &s.levels), buffer_entry(4, &s.blocks)];
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("emitter weights"), layout, entries: &entries });
         let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("emitter weights"), timestamp_writes: None });
         pass.set_bind_group(0, &bg, &[]);

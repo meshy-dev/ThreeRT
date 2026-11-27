@@ -1267,6 +1267,16 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
     }
 }
 
+/// The emitters' total weight as the kernel reads it: the header of their table on the GPU.
+fn kernel_total(c: &LiveCore) -> f32 {
+    let heap = &c.sc.up.heap;
+    let n = c.sc.tables.emitter_tris.len();
+    if n == 0 {
+        return 0.0;
+    }
+    read_back::<[f32; 4]>(c, &heap.buffer, heap.at(Table::Emitters) + crate::emitter_header(n) as u64 * 16, 16)[0][0]
+}
+
 /// A view that took edits in place against one built from the edited world: the emitters that weigh something are as
 /// many, each weighs what a build's does where a build's is, the kernel's total weight is a build's, and so is the
 /// picture after 64 frames.
@@ -1282,10 +1292,11 @@ fn lit_as_a_build(what: &str, live: &mut LiveCore, fresh: &mut LiveCore) {
     for (l, f) in wl.iter().zip(&wf) {
         assert!((l.0 - f.0).abs() <= 1e-5 * f.0 && (Vec3::from(l.1) - Vec3::from(f.1)).length() <= 1e-4, "{what}: an emitter weighs {l:?}, a build's {f:?}");
     }
-    let (tl, tf) = (live.sc.base.misc[1], fresh.sc.base.misc[1]);
-    assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
     forget(live);
     let (a, b) = (picture(live, 64), picture(fresh, 64));
+    // (After a frame: the weights an edit left dirty are made by then.)
+    let (tl, tf) = (kernel_total(live), kernel_total(fresh));
+    assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
     assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
 }
 
@@ -1456,7 +1467,6 @@ fn power_edits_keep_the_light_lists_codes() {
                 w.set_transform(14, Vec3::new(-0.35 + 0.1 * k as f32, -0.45, 0.6), glam::Quat::from_rotation_z(0.3 * k as f32), Vec3::ONE).unwrap();
             }
             live.commit(&mut w).unwrap();
-            live.land_powers_now();
             list_is_its_triangles(&what(&format!("power {power}{}", if k > 0 { " and a material that starts emitting" } else { "" })), &live);
         }
         let t = &live.sc.tables;
@@ -5320,30 +5330,39 @@ fn weights_on_the_gpu(count: u32) {
     };
     assert_eq!(live.sc.tables.light_tree.is_some(), count >= 256, "a light tree from 256 emitters on");
     w.take_changes();
-    let mut again = |what: &str, live: &mut LiveCore| {
-        picture(live, 1);
-        live.weights_dirty = true;
+    // (As loaded the table is the CPU's: made again once by hand. From then on each edit leaves it to the GPU.)
+    live.weights_dirty = true;
+    picture(&mut live, 1);
+    weights_as_the_cpus("as loaded", &live);
+    let mut edited = |what: &str, w: &mut World, live: &mut LiveCore| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert!(live.weights_dirty, "{what}: the weights are to be made again");
         picture(live, 1);
         weights_as_the_cpus(what, live);
     };
-    again("as loaded", &mut live);
     for i in 0..count {
         if i % 3 == 0 {
             w.set_power(100 + i, if i % 2 == 0 { 0.25 } else { 0.0 }).unwrap();
         }
     }
-    assert!(!live.commit(&mut w).unwrap(), "powers: in place ({:?})", live.fallback);
-    again("some dimmed, some off", &mut live);
+    edited("some dimmed, some off", &mut w, &mut live);
     for i in 0..count {
         w.set_power(100 + i, 0.0).unwrap();
     }
-    assert!(!live.commit(&mut w).unwrap(), "all off: in place ({:?})", live.fallback);
-    again("all off", &mut live);
+    edited("all off", &mut w, &mut live);
+    assert_eq!(kernel_total(&live), 0.0, "all off: nothing weighs");
     for i in 0..count {
         w.set_power(100 + i, 1.0 + (i % 5) as f32).unwrap();
     }
-    assert!(!live.commit(&mut w).unwrap(), "back on: in place ({:?})", live.fallback);
-    again("back on", &mut live);
+    edited("back on", &mut w, &mut live);
+    // Their material brighter, and of another colour.
+    w.set_material(5, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.0, 0.0, 0.0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1.0, 0.5, 0.2], "emissiveIntensity": 90.0, "doubleSided": true })).unwrap());
+    edited("the material brighter", &mut w, &mut live);
+    // Some removed: their runs are retired.
+    for i in (0..count).step_by(7) {
+        w.remove(100 + i);
+    }
+    edited("some removed", &mut w, &mut live);
 }
 
 #[test]

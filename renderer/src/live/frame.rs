@@ -173,21 +173,15 @@ impl LiveCore {
         b.emit_power[1] = cull;
         b.emit_power[2] = cull * EMITTER_CULL_VIEW;
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, cone];
-        // Power edits held back for the emitter worker land first (its job in flight was built for the old reference:
-        // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
-        self.land_powers_now();
-        let (e, b) = (&self.sc.tables, &mut self.sc.base);
-        let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref()), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
-        self.sc.up.heap.write(&self.g.queue, Table::Emitters, 0, bytemuck::cast_slice(&em));
-        // (The CPU's copy: the kernel reads the total from the table's header, `emitter_cdf`.)
-        b.misc[1] = total;
-        b.emit_power[0] = power;
+        // The weights carry the factor: made again from the new reference.
+        self.weights_dirty = true;
     }
 
     pub fn render(&mut self, spp: u32, extra: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::Buffer)) {
         // A dynamic sky's bake that finished since the last frame (time of day).
         self.take_sky();
-        self.take_emitters();
+        // Runs of the light list retired since the last frame: their records say so, and the weights follow.
+        self.weights_dirty |= self.flush_retired();
         // Settings a game or page requested since the last frame.
         if let Some(r) = self.rendering_control.as_ref().and_then(|c| c.take()) { self.set_rendering(r); }
         let (w, h) = (self.w, self.h);

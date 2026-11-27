@@ -19,11 +19,8 @@ pub struct Dirty {
     /// A local light moved, or went dark or lit: the light groups are sorted again (`Tables::regroup_lights`).
     pub lights_moved: bool,
     pub objects: bool,
-    /// Emitter weights changed (powers): the emitter CDF and the light tree's powers are rebuilt.
+    /// Emitter weights changed (powers): they are made again (live/edits.rs `commit`).
     pub emitters: bool,
-    /// Power edits held back (`Tables::defer_powers`): the live view's emitter worker rebuilds the CDF and the tree's
-    /// powers for them, and they land together.
-    pub deferred: bool,
     /// A material's class changed (glass or not, a cutout or not): the instances with a row of one have their rows
     /// remade (live/edits.rs `remake_classes`).
     pub reclassed: bool,
@@ -31,7 +28,7 @@ pub struct Dirty {
 
 impl Dirty {
     pub fn any(&self) -> bool {
-        self.materials || self.lights || self.objects || self.emitters || self.deferred
+        self.materials || self.lights || self.objects || self.emitters
     }
 }
 
@@ -59,11 +56,8 @@ pub struct Tables {
     pub light_index: HashMap<u32, Vec<usize>>,
     /// vec4s an object in `objects` (`scene::object_stride`).
     pub stride: usize,
-    /// Power edits are held back in `deferred` instead of written to `objects` (the live view's emitter worker: a
-    /// scene with many emitters, live/load.rs `EmitterWorker`).
-    pub defer_powers: bool,
-    /// Held-back power edits: (the object's first row in `objects`, its power, the time of the edit).
-    pub deferred: Vec<(usize, f32, f32)>,
+    /// Runs of the light list retired since the last commit's end (`retire`), for their records' `EMITTER_GONE`.
+    pub retired: Vec<std::ops::Range<usize>>,
 }
 
 impl Tables {
@@ -86,12 +80,23 @@ impl Tables {
             reclassed: vec![],
             light_index,
             stride: sc.object_stride(),
-            defer_powers: false,
-            deferred: vec![],
+            retired: vec![],
         }
     }
 
     /// Writes power edits into `objects` (the power, and the time of the edit, the second row's w).
+    /// A run of the light list retired: its emitters weigh nothing from now on (their entries and the tree keep
+    /// their places), on the CPU by their area, on the GPU by their records' `EMITTER_GONE`, written at the commit's
+    /// end.
+    pub fn retire(&mut self, run: std::ops::Range<usize>) {
+        for e in &mut self.emitter_tris[run.clone()] {
+            e.area = 0.0;
+        }
+        if !run.is_empty() {
+            self.retired.push(run);
+        }
+    }
+
     pub fn put_powers(&mut self, powers: &[(usize, f32, f32)]) {
         for &(row, power, now) in powers {
             self.objects[row][3] = power;
@@ -121,15 +126,9 @@ impl Tables {
                 // no weight until it comes back.)
                 let unseen = matches!(o.kind, Kind::Mesh { .. } | Kind::Model { .. }) && (!w.shown(*id) || scene::placed_world(w.world_matrix(*id), glam::Vec3::ZERO).1);
                 let power = if unseen { 0.0 } else { o.power.max(0.0) };
-                if self.defer_powers {
-                    self.deferred.retain(|p| p.0 != row);
-                    self.deferred.push((row, power, now));
-                    d.deferred = true;
-                } else {
-                    self.put_powers(&[(row, power, now)]);
-                    d.objects = true;
-                    d.emitters = true;
-                }
+                self.put_powers(&[(row, power, now)]);
+                d.objects = true;
+                d.emitters = true;
             }
             self.update_light(w, *id, &mut d);
         }

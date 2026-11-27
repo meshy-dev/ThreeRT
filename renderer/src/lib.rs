@@ -124,6 +124,15 @@ pub const NO_INST: u32 = u32::MAX;
 pub const EMITTER_MOVES: u32 = 1 << 31;
 /// `GpuEmitterTri::flags`: a rect light's card (`EmitterTri::card`).
 pub const EMITTER_CARD: u32 = 1;
+/// `GpuEmitterTri::flags`: its run was retired (`tables::Tables::retire`): it weighs nothing.
+pub const EMITTER_GONE: u32 = 2;
+/// `GpuEmitterTri::flags`: it is weighed by the nominal area in `GpuEmitterTri::nominal` (`EmitterTri::nominal`).
+pub const EMITTER_NOMINAL: u32 = 4;
+
+/// An emitter's `GpuEmitterTri::flags` while it is in use.
+pub fn emitter_flags(e: &EmitterTri) -> u32 {
+    (if e.card { EMITTER_CARD } else { 0 }) | (if e.nominal { EMITTER_NOMINAL } else { 0 })
+}
 const _: () = assert!((ltree::PATH_BITS + 2) << ltree::PATH_BITS <= EMITTER_MOVES);
 
 /// An emitter's triangle as the kernel's light sampling reads it (pathtrace.wgsl `EmitterTri`; `Table::EmitterTris`,
@@ -142,7 +151,9 @@ pub struct GpuEmitterTri {
     pub code: u32,
     pub part: u32,
     pub flags: u32,
-    pub spare: [u32; 2],
+    /// With `EMITTER_NOMINAL`: the area it is weighed by (f32 bits).
+    pub nominal: u32,
+    pub spare: u32,
 }
 
 impl GpuEmitterTri {
@@ -151,7 +162,7 @@ impl GpuEmitterTri {
         let v = |r: usize| [rows[r][0], rows[r][1], rows[r][2]];
         // (As a hit has it: with an instance its section, without one its row, which is its triangle's.)
         let part = if e.inst == NO_INST { e.tri } else { e.part };
-        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 }, part, flags: if e.card { EMITTER_CARD } else { 0 }, spare: [0; 2] }
+        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 }, part, flags: emitter_flags(e), nominal: if e.nominal { e.area.to_bits() } else { 0 }, spare: 0 }
     }
 
     /// As `new`, from its vertices.
@@ -707,7 +718,7 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         size: [sc.width, sc.height, 0, rng_seed()],
         // (The preset's and the exposure's: `Params::set_preset`; the sky's: `SkyBaked::write`; the environment's:
         // `EnvSettings::write`. Below.)
-        counts: [sc.lights.len() as u32, if total > 0.0 { emitter_tris.len() as u32 } else { 0 }, 0, 0],
+        counts: [sc.lights.len() as u32, emitter_tris.len() as u32, 0, 0],
         env: [0.0, 0.0, 0.0, -1.0],
         misc: [0.0, total, 0.0, 0.0],
         sky_color: [0.0; 4],
