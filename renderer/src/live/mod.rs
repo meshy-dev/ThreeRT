@@ -1206,22 +1206,32 @@ mod timer_tests {
     fn a_post_pass_from_another_frame_counts_by_its_own_length() {
         // Two frames of the crowd scene (ns, period 1): frame 453 as read, and frame 454, whose slot read frame 458's
         // post pair (74.5 ms after its trace began).
-        let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0];
-        let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0];
-        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1, 1.0).unwrap();
+        let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0, 0, 0];
+        let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0, 0, 0];
+        let ms = |t: [u64; 10]| frame_gpu_ms(&t, 1, 1.0).unwrap();
         assert_eq!(ms(t453), (t453[3] - t453[0]) as f32 * 1e-6);
         assert!((ms(t454) - (7.849166 + 5.660166)).abs() < 1e-3, "{}", ms(t454));
         // The first pass is the frame's start; nothing timed, no measurement.
-        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1, 1.0), None);
-        let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000];
+        assert_eq!(frame_gpu_ms(&[0; 10], 1, 1.0), None);
+        let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000, 0, 0];
         assert_eq!(frame_gpu_ms(&particles_first, 1, 1.0), Some(13.0));
-        let weights_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 1_500_000, 1_900_000, 0, 0];
+        let weights_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 1_500_000, 1_900_000, 0, 0, 0, 0];
         assert_eq!(frame_gpu_ms(&weights_first, 1, 1.0), Some(12.5));
         // 3 samples: two more traces (untimed) between the first and the post pass, a 16.2 ms gap: the span. The post
         // pair of frame 458 under 3 samples: still out of place (trace 7.85 ms, gap 66.7 ms), counted as the passes.
-        let three = [1_000_000, 9_000_000, 25_200_000, 31_000_000, 0, 0, 0, 0];
+        let three = [1_000_000, 9_000_000, 25_200_000, 31_000_000, 0, 0, 0, 0, 0, 0];
         assert_eq!(frame_gpu_ms(&three, 3, 1.0), Some(30.0));
         assert!((frame_gpu_ms(&t454, 3, 1.0).unwrap() - (3.0 * 7.849166 + 5.660166)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_frame_with_a_reconstruction_provider_ends_with_the_passes_after_it() {
+        // The trace, the passes before the provider (the second pair), the provider, the passes after it (the fifth).
+        let t = [2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 11_300_000, 12_000_000];
+        assert_eq!(frame_gpu_ms(&t, 1, 1.0), Some(10.0));
+        // A late post pass: the trace, then from the second pair's begin to the fifth's end.
+        let late = [2_000_000, 9_000_000, 29_200_000, 30_500_000, 0, 0, 0, 0, 31_300_000, 32_000_000];
+        assert_eq!(frame_gpu_ms(&late, 1, 1.0), Some(7.0 + 2.8));
     }
 }
 

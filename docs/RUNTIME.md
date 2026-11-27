@@ -1961,9 +1961,15 @@ against 256-spp offline references for a still camera and a lateral move. It sav
 image metrics under `out/metalfx/` and checks which implementation actually ran.
 Use `--scene glass` for the refraction workbench or `--scene cornell` for the Cornell box.
 On an Apple M1 running macOS 27.2.1, the glass camera move scored 0.909 SSIM with the built-in path,
-0.944 with MetalFX temporal and 0.940 with joint denoising. At the same 320 × 180 input and 640 × 360
-output, median GPU frame times with the camera held still were 9.69, 9.78 and 10.22 ms respectively.
+0.944 with MetalFX temporal and 0.940 with joint denoising.
 On the Cornell box the built-in path scored highest for both camera poses.
+
+A frame's GPU time is read from its first pass to its last under every method, the provider's work between them
+(Metal times a pass by a pair of stamps: the passes before a provider and those after it are a pair each). On an
+Apple M5 Pro at 960 × 540, half scale, still (2026-11-27; a room of lamps / a night street with a crowd): built-in
+2.30 / 4.11 ms, FSR 2.08 / 3.82, MetalFX temporal 2.39 / 4.13, joint denoising 2.64 / 4.36. (Until then a
+provider's frame read as its trace and the provider's command buffer: the passes of ours around it were lost, and
+the dynamic resolution steered by that.)
 
 ## The post chain
 

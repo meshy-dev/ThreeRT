@@ -17,39 +17,47 @@ pub(super) struct FrameTimer {
 }
 
 pub(super) const TIMER_SLOTS: usize = 4;
+/// Stamps a slot, a pair a pass: the trace, the post pass, the emitter weights', the particles', and the post pass
+/// after a reconstruction provider.
+pub(super) const TIMER_QUERIES: u32 = 10;
 
 /// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
 pub(super) const TIMER_GAP_MS: f32 = 2.0;
 
-/// A frame's GPU time (ms) from its slot's timestamps (trace, post, the emitter weights', particle pass pairs; zero:
-/// not run): from its first pass (particles, the emitters' weights or trace) to the end of its post pass. The post pass follows the trace's command
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, the emitter weights', particle pass pairs, the post
+/// pass after a provider; zero: not run): from its first pass (particles, the emitters' weights or trace) to the end of
+/// its last. The post pass follows the trace's command
 /// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
 /// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
 /// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
 /// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
 /// its passes, the further traces at the first one's length.
-pub(super) fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
+pub(super) fn frame_gpu_ms(t: &[u64; 10], spp: u32, period_ns: f32) -> Option<f32> {
     let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
-    if t[3] <= start {
+    // With a reconstruction provider the post pass is two, the provider between them: the passes before it (the
+    // second pair) and those after it (the fifth). One pair split over the two did not time them: on Metal the stamp
+    // of a pass that writes its begin alone read 10 ms late, and the frame counted as its trace.
+    let end = t[3].max(t[9]);
+    if end <= start {
         return None;
     }
     let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
     let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
     if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
-        return Some(ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2])));
+        return Some(ms(t[1] - start) + more as f32 * trace + ms(end.saturating_sub(t[2])));
     }
-    Some(ms(t[3] - start))
+    Some(ms(end - start))
 }
 
 impl FrameTimer {
     pub(super) fn new(d: &wgpu::Device) -> FrameTimer {
         let n = TIMER_SLOTS as u64;
         FrameTimer {
-            // Per slot: trace pass begin / end, post pass begin / end, the emitter weights', particle pass begin / end
-            // (Metal writes a pass's timestamps in pairs).
-            queries: d.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame timer"), ty: wgpu::QueryType::Timestamp, count: (n * 8) as u32 }),
-            resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
-            reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
+            // Per slot, begin / end: the trace, the post pass, the emitter weights', the particles', the post pass after
+            // a provider (Metal writes a pass's timestamps in pairs).
+            queries: d.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame timer"), ty: wgpu::QueryType::Timestamp, count: n as u32 * TIMER_QUERIES }),
+            resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * (TIMER_QUERIES as u64 / 2) * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+            reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: TIMER_QUERIES as u64 * 8, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
             frames: [0; TIMER_SLOTS],
             spps: [1; TIMER_SLOTS],
             slot: 0,
@@ -62,7 +70,7 @@ impl FrameTimer {
         let mut latest: Option<(f32, u32, f32)> = None;
         for (k, (buf, state)) in self.reads.iter().enumerate() {
             if state.load(Ordering::Acquire) == 2 {
-                let t: [u64; 8] = bytemuck::pod_read_unaligned(&buf.slice(..).get_mapped_range().unwrap()[..64]);
+                let t: [u64; 10] = bytemuck::pod_read_unaligned(&buf.slice(..).get_mapped_range().unwrap()[..80]);
                 buf.unmap();
                 state.store(0, Ordering::Release);
                 let frame = self.frames[k];
@@ -76,6 +84,19 @@ impl FrameTimer {
             self.slot = (k + 1) % TIMER_SLOTS;
         }
         (latest, slot)
+    }
+
+    /// Pair `pair` of `slot` into the slot's readback, in the command buffer that wrote it (Metal reads zeros
+    /// otherwise); `ran` false: zeros.
+    pub(super) fn resolve_pair(&self, e: &mut wgpu::CommandEncoder, slot: usize, pair: u32, ran: bool) {
+        let at = (slot as u64 * (TIMER_QUERIES as u64 / 2) + pair as u64) * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+        if ran {
+            let q = slot as u32 * TIMER_QUERIES + pair * 2;
+            e.resolve_query_set(&self.queries, q..q + 2, &self.resolve, at);
+        } else {
+            e.clear_buffer(&self.resolve, at, Some(16));
+        }
+        e.copy_buffer_to_buffer(&self.resolve, at, &self.reads[slot].0, pair as u64 * 16, 16);
     }
 }
 
@@ -244,7 +265,7 @@ impl LiveCore {
             Some(t) => {
                 let (latest, slot) = t.harvest(period);
                 if let Some((ms, frame, trace)) = latest {
-                    (self.gpu_ms, self.gpu_frame, self.gpu_trace_ms) = (ms + self.reconstructor.untimed_gpu_ms(), frame, trace);
+                    (self.gpu_ms, self.gpu_frame, self.gpu_trace_ms) = (ms, frame, trace);
                 }
                 if let Some(k) = slot {
                     t.frames[k] = self.frame;
@@ -362,7 +383,7 @@ impl LiveCore {
                 let stateless = self.sc.up.particles.is_some();
                 let (pass_ts, blas_ts) = match (&self.profile, &self.timer, timed, stateless) {
                     (Some(p), _, _, false) => (Some((&p.queries, n * 2)), Some((&p.queries, n * 2 + 2))),
-                    (None, Some(t), Some(slot), false) => (Some((&t.queries, slot as u32 * 8 + 6)), None),
+                    (None, Some(t), Some(slot), false) => (Some((&t.queries, slot as u32 * TIMER_QUERIES + 6)), None),
                     _ => (None, None),
                 };
                 let spawns = std::mem::take(&mut self.particle_spawns);
@@ -373,7 +394,7 @@ impl LiveCore {
                 let n = self.passes.pipes.len() as u32 + 2;
                 let pass_ts = match (&self.profile, &self.timer, timed) {
                     (Some(p), _, _) => Some((&p.queries, n * 2)),
-                    (None, Some(t), Some(slot)) => Some((&t.queries, slot as u32 * 8 + 6)),
+                    (None, Some(t), Some(slot)) => Some((&t.queries, slot as u32 * TIMER_QUERIES + 6)),
                     _ => None,
                 };
                 let blas_ts = self.profile.as_ref().map(|p| (&p.queries, n * 2 + 2));
@@ -387,7 +408,7 @@ impl LiveCore {
             if k == 0 && std::mem::take(&mut self.weights_dirty) && !self.sc.tables.emitter_tris.is_empty() {
                 let (t, b) = (&self.sc.tables, &self.sc.base);
                 let ts = match (&self.profile, &self.timer, timed) {
-                    (None, Some(t), Some(slot)) => Some((&t.queries, slot as u32 * 8 + 4)),
+                    (None, Some(t), Some(slot)) => Some((&t.queries, slot as u32 * TIMER_QUERIES + 4)),
                     _ => None,
                 };
                 weighed = ts.is_some();
@@ -396,7 +417,7 @@ impl LiveCore {
             {
                 let tw = match (&self.profile, &self.timer, timed) {
                     (Some(p), _, _) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(0), end_of_pass_write_index: Some(1) }),
-                    (None, Some(t), Some(slot)) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8), end_of_pass_write_index: Some(slot as u32 * 8 + 1) }),
+                    (None, Some(t), Some(slot)) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES), end_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES + 1) }),
                     _ => None,
                 };
                 if let Some((_, d)) = &finish {
@@ -446,19 +467,9 @@ impl LiveCore {
             }
             // Each pair is resolved in the command buffer that wrote it (Metal reads zeros otherwise).
             if let (None, Some(t), Some(slot), 0) = (&self.profile, &self.timer, timed, k) {
-                let q = slot as u32 * 8;
-                let at = slot as u64 * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
-                e.resolve_query_set(&t.queries, q..q + 2, &t.resolve, at);
-                e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, 0, 16);
-                // The emitter weights' pair and the particle pair (pairs 2 and 3); zeros when the pass did not run.
-                for (pair, ran) in [(2u32, weighed), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
-                    let at = at + pair as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
-                    if ran {
-                        e.resolve_query_set(&t.queries, q + pair * 2..q + pair * 2 + 2, &t.resolve, at);
-                    } else {
-                        e.clear_buffer(&t.resolve, at, Some(16));
-                    }
-                    e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, pair as u64 * 16, 16);
+                // The trace's pair, the emitter weights' and the particles' (zeros when the pass did not run).
+                for (pair, ran) in [(0u32, true), (2, weighed), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
+                    t.resolve_pair(&mut e, slot, pair, ran);
                 }
             }
             g.queue.submit([e.finish()]);
@@ -591,13 +602,18 @@ impl LiveCore {
             e.resolve_query_set(&p.queries, 0..n * 2, &p.resolve, 0);
             e.copy_buffer_to_buffer(&p.resolve, 0, &p.read, 0, p.read.size());
         } else {
-            let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
-            let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw.clone().map(|mut t| { if use_provider { t.end_of_pass_write_index = None; } t }) });
+            // A pass is timed by a pair of stamps of its own: with a provider, the passes before it (the second pair,
+            // resolved before the provider may end this command buffer) and those after it (the fifth).
+            let pair = |k: u32| self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES + k), end_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES + k + 1) });
+            let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: pair(2) });
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 if use_provider && *name == "upscale" {
                     drop(pass);
+                    if let (Some(t), Some(slot)) = (&self.timer, timed) {
+                        t.resolve_pair(&mut e, slot, 1, true);
+                    }
                     before_post = reconstruct(&mut e);
-                    pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("post after reconstruction"), timestamp_writes: tw.clone().map(|mut t| { t.beginning_of_pass_write_index = None; t }) });
+                    pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("post after reconstruction"), timestamp_writes: pair(8) });
                     tl_dispatch(&mut pass, false);
                     tl_dispatch(&mut pass, true);
                     continue;
@@ -616,10 +632,10 @@ impl LiveCore {
             }
             drop(pass);
             if let (Some(t), Some(slot)) = (&self.timer, timed) {
-                let q = slot as u32 * 8 + 2;
-                let at = (slot as u64 * 4 + 1) * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
-                e.resolve_query_set(&t.queries, q..q + 2, &t.resolve, at);
-                e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, 16, 16);
+                if !use_provider {
+                    t.resolve_pair(&mut e, slot, 1, true);
+                }
+                t.resolve_pair(&mut e, slot, 4, use_provider);
             }
         }
         if let (Some((read, _)), Some(count), true) = (&self.guard_read, &self.targets.kernel.guard, guard_free) {

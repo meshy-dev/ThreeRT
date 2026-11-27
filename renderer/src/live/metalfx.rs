@@ -12,7 +12,6 @@ unsafe extern "C" {
     /// (min, max output / input), 3 = the scaler failed to build.
     fn threert_fx_create(device: *const c_void, denoise: bool, dynamic: bool, iw: u32, ih: u32, ow: u32, oh: u32, scales: *mut f32, why: *mut i32) -> *mut c_void;
     fn threert_fx_release(scaler: *mut c_void);
-    fn threert_fx_gpu_ms() -> f32;
     /// `inputs`: the frame's colour, depth, motion, reactive; then (denoise) overlay, bypass, diffuse albedo,
     /// specular albedo, normal, roughness, specular hit distance.
     fn threert_fx_bind(scaler: *mut c_void, denoise: bool, inputs: *const *const c_void, output: *const c_void);
@@ -128,7 +127,6 @@ impl UpscaleProvider for MetalFx {
     fn encode(&mut self, frame: ReconstructionFrame<'_>, _: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
         MetalFx::encode(self, &frame, None)
     }
-    fn untimed_gpu_ms(&self) -> f32 { if self.scaler.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 } }
     fn scale_range(&self) -> Option<[f32; 2]> { self.scales }
     fn invalidate(&mut self) { self.scaler = None; self.key = None; }
 }
@@ -138,7 +136,6 @@ impl JointProvider for MetalFx {
     fn encode(&mut self, frame: ReconstructionFrame<'_>, guides: JointGuides<'_>, _: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
         MetalFx::encode(self, &frame, Some(&guides))
     }
-    fn untimed_gpu_ms(&self) -> f32 { if self.scaler.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 } }
     fn scale_range(&self) -> Option<[f32; 2]> { self.scales }
     fn invalidate(&mut self) { self.scaler = None; self.key = None; }
     /// The denoised scaler is not linear in its input's level. Given lighting near display white it averaged the

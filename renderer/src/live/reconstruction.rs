@@ -235,10 +235,6 @@ pub trait UpscaleProvider: Send {
     /// On error the encoder stays usable; the frame falls back to ThreeRT's own.
     fn encode(&mut self, frame: ReconstructionFrame<'_>, encoder: &mut CommandEncoder) -> Result<Option<CommandBuffer>>;
 
-    /// GPU time (ms) of work outside `encoder` (a native command buffer), last finished frame: added to the frame's,
-    /// which the dynamic-resolution governor steers by.
-    fn untimed_gpu_ms(&self) -> f32 { 0.0 }
-
     /// The render scales (input / output, a side) it takes at the output last prepared, when it knows them (also after
     /// answering `Unsupported`): dynamic resolution stays within them while it is the method asked for.
     fn scale_range(&self) -> Option<[f32; 2]> { None }
@@ -252,7 +248,6 @@ pub trait JointProvider: Send {
     fn prepare(&mut self, gpu: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared>;
     /// As [`UpscaleProvider::encode`].
     fn encode(&mut self, frame: ReconstructionFrame<'_>, guides: JointGuides<'_>, encoder: &mut CommandEncoder) -> Result<Option<CommandBuffer>>;
-    fn untimed_gpu_ms(&self) -> f32 { 0.0 }
     /// As [`UpscaleProvider::scale_range`].
     fn scale_range(&self) -> Option<[f32; 2]> { None }
     fn invalidate(&mut self) {}
@@ -270,9 +265,6 @@ impl Provider {
     fn joint(&self) -> bool { matches!(self, Self::Joint(_)) }
     fn prepare(&mut self, g: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared> {
         match self { Self::Upscale(p) => p.prepare(g, size), Self::Joint(p) => p.prepare(g, size) }
-    }
-    fn untimed_gpu_ms(&self) -> f32 {
-        match self { Self::Upscale(p) => p.untimed_gpu_ms(), Self::Joint(p) => p.untimed_gpu_ms() }
     }
     fn white_units(&self) -> f32 {
         match self { Self::Upscale(_) => 32.0, Self::Joint(p) => p.white_units() }
@@ -559,14 +551,6 @@ impl Reconstructor {
         match self.active {
             Active::Upscaler(i) | Active::Joint(i) => self.providers[i].1.white_units(),
             _ => 32.0,
-        }
-    }
-
-    /// GPU time (ms) the active provider spends outside the frame timer's passes.
-    pub(super) fn untimed_gpu_ms(&self) -> f32 {
-        match self.active {
-            Active::Upscaler(i) | Active::Joint(i) => self.providers[i].1.untimed_gpu_ms(),
-            _ => 0.0,
         }
     }
 
