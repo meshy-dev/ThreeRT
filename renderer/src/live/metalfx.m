@@ -2,18 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <math.h>
-#include <stdatomic.h>
 #include <string.h>
 
-// GPU time (ms, float bits) of the last finished command buffer that ran a scaler: the engine's timestamps time its
-// own passes only, and the dynamic-resolution governor needs the whole frame.
-static _Atomic uint32_t threert_fx_ms_bits;
-float threert_fx_gpu_ms(void) {
-    uint32_t b = atomic_load_explicit(&threert_fx_ms_bits, memory_order_relaxed);
-    float f;
-    memcpy(&f, &b, sizeof f);
-    return f;
-}
 #if __has_include(<MetalFX/MetalFX.h>)
 #import <MetalFX/MetalFX.h>
 #endif
@@ -169,12 +159,7 @@ void threert_fx_encode(void *scaler, bool denoise, void *command, bool reset, ui
         // alive even when the next frame switches backend or recreates the surfaces.
         [buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
             (void)[s class];
-            float ms = (float)((completed.GPUEndTime - completed.GPUStartTime) * 1000.0);
-            if (ms >= 0.0f && ms < 1000.0f) {
-                uint32_t b;
-                memcpy(&b, &ms, sizeof b);
-                atomic_store_explicit(&threert_fx_ms_bits, b, memory_order_relaxed);
-            }
+            (void)completed;
         }];
     }
 #endif
