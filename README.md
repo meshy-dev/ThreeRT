@@ -143,6 +143,8 @@ npm install @threert/scene @threert/gameplay
 ### Build the engine from source
 
 The engine is Rust and [wgpu](https://wgpu.rs): hardware ray queries where the GPU has them (Metal, Vulkan), a software BVH where it does not. You need Rust, Node 24 and [Bun](https://bun.sh).
+`setup.ts` skips, with a note, what it cannot fetch: the mannequin scenes need Google Chrome or Chromium (on PATH, or
+`CHROME=<binary>`), and Bistro and Zero-Day need [Blender](https://www.blender.org) (on PATH, or `BLENDER=<binary>`).
 
 ```bash
 npm install && bun scripts/setup.ts      # assets/ -> the machine's shared asset store, then fetch what is missing

@@ -1,0 +1,12 @@
+# Text is checked out with LF on every platform. The renderer's tests read shaders and other sources with
+# include_str! and match multi-line strings joined with "\n"; a CRLF checkout (Git for Windows' default
+# core.autocrlf=true) fails them (#158).
+* text=auto eol=lf
+
+# Binary, whatever git's heuristic says.
+*.glb binary
+*.jpg binary
+*.mp4 binary
+*.spv binary
+*.tpg binary
+*.webp binary

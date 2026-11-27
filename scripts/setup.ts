@@ -12,6 +12,7 @@
 import { $ } from "bun";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { findChrome } from "../tools/lib/chrome.ts";
 
 const args = process.argv.slice(2);
 const opt = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : undefined);
@@ -87,9 +88,8 @@ if (!existsSync(helmet)) {
 }
 await $`node tools/fetch-polyhaven.ts`.cwd(root);
 await $`node tools/fetch-khronos.ts`.cwd(root);
-const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-if (existsSync(chrome) || existsSync(a("quaternius/ual/UAL1_Standard.glb"))) await $`node tools/fetch-quaternius.ts`.cwd(root);
-else console.log("skipping Quaternius (needs Google Chrome, or CHROME=<binary>): the mannequin scenes and animation/skinned-pose test need it");
+if (findChrome() || existsSync(a("quaternius/ual/UAL1_Standard.glb"))) await $`node tools/fetch-quaternius.ts`.cwd(root);
+else console.log("skipping Quaternius (needs Google Chrome or Chromium on PATH, or CHROME=<binary>): the mannequin scenes and animation/skinned-pose test need it");
 // Bistro and Zero Day (ORCA, FBX + DDS -> glTF; needs Blender, skips itself without it; ~2 GB download once).
 await $`bun scripts/orca.ts`.cwd(root);
 // The voxel benchmark level (games/voxel-level, ROADMAP § 6 step 2): generated, not downloaded (~4 s, ~0.3 GB; skips a

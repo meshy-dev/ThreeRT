@@ -4622,6 +4622,32 @@ mod tests {
         wesl_wgsl(include_str!("../shaders/leaf_gather.wgsl"), &[], &[]);
     }
 
+    /// The shaders are LF on every checkout (.gitattributes): the tests match multi-line spans of them joined with
+    /// "\n", and a CRLF checkout (Git for Windows' default) failed those (#158) where this says why.
+    #[test]
+    fn the_shaders_are_lf() {
+        let files = [
+            ("emitter_fill", include_str!("../shaders/emitter_fill.wgsl")),
+            ("fsr", include_str!("../shaders/fsr.wgsl")),
+            ("gpu_particles", include_str!("../shaders/gpu_particles.wgsl")),
+            ("grid_sim", include_str!("../shaders/grid_sim.wgsl")),
+            ("leaf_gather", include_str!("../shaders/leaf_gather.wgsl")),
+            ("live", include_str!("../shaders/live.wgsl")),
+            ("particles", include_str!("../shaders/particles.wgsl")),
+            ("pathtrace", include_str!("../shaders/pathtrace.wgsl")),
+            ("reconstruction", include_str!("../shaders/reconstruction.wgsl")),
+            ("records", include_str!("../shaders/records.wgsl")),
+            ("sample", include_str!("../shaders/sample.wgsl")),
+            ("skin", include_str!("../shaders/skin.wgsl")),
+            ("trace_hw", include_str!("../shaders/trace_hw.wgsl")),
+            ("trace_units", include_str!("../shaders/trace_units.wgsl")),
+            ("translucent", include_str!("../shaders/translucent.wgsl")),
+        ];
+        for (name, src) in files {
+            assert!(!src.contains('\r'), "{name}.wgsl has CR line endings: delete renderer/shaders and `git checkout -- renderer/shaders` to check it out again with .gitattributes' eol=lf");
+        }
+    }
+
     /// The kernel is compiled with its loops bounded and nothing else checked, unless asked.
     #[test]
     fn the_kernels_loops_are_bounded() {

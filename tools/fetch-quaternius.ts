@@ -10,9 +10,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./bundle-game.ts";
+import { chromeOrDefault } from "./lib/chrome.ts";
 
 const PAGE = "https://quaternius.itch.io/universal-animation-library/purchase";
-const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME = chromeOrDefault();
 const out = join(repoRoot, "assets/quaternius/ual");
 const work = join(repoRoot, "out/downloads/quaternius");
 const glb = join(out, "UAL1_Standard.glb");

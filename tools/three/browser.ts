@@ -8,10 +8,11 @@ import { createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, statSync,
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
+import { chromeOrDefault } from "../lib/chrome.ts";
 
 export const root = resolve(import.meta.dirname, "../..");
 export const pagesDir = join(root, "out/three/pages");
-const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME = chromeOrDefault();
 
 /** Bundles `src` (scene module or game) + a three.js page (default: the WebGL baseline, tools/three/page.ts) for the
  *  browser: out/three/pages/<id>.{js,html}. */
