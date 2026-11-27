@@ -936,7 +936,8 @@ reads files under the asset root as it goes and adds what they hold without rebu
   be); showing an object that was hidden when the scene was built or rebuilt (move it out of sight instead of hiding
   it); a model of nodes the file lacks (it draws nothing and has no instance to hide).
 - **Emitters cost the commit**: each commit that adds or removes emitting triangles writes the emitter CDF and the
-  light tree's dynamic part over every emitter of the scene. Add a cell's emitting meshes together, and draw far lights
+  light tree's dynamic part over every emitter of the scene. (A power or a material edit does not: the GPU makes
+  the weights again in that frame.) Add a cell's emitting meshes together, and draw far lights
   with unlit materials (`MeshBasicMaterial`, or glTF `KHR_materials_unlit`, whose emission is then what it shows): they
   are seen and light nothing.
 - **Instances cost what changed.** An `InstancedMesh` adds its copies as TLAS instances, in place, all of them
@@ -1624,7 +1625,9 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   spheres, the emitter CDF with its guide table, the texture pages' rects, objects, instance records, media, the
   GGX and glass energy tables, and the emitters' triangles (`GpuEmitterTri`: the light list's own world-space
   copies, so a light sample reads no placement; what moves an emitter after the load is copied again on the GPU,
-  `emitter_fill.wgsl`).
+  `emitter_fill.wgsl`). The emitters' weights, their cumulative table, its guide, the tree's powers and the
+  table's header (the total, the share outside the tree) are made on the GPU too, in the frame after anything
+  they depend on changed (`emitter_weights.wgsl`).
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
   colours, the instances' rows, and the triangles' indices ("The scene's triangles" below) (`env_cdf_at`,
   `pword`, `vcolor_word`, `tri_indices`). Integers are read as integers, not through a float's bits.

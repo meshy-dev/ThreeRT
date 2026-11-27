@@ -21,15 +21,15 @@ pub(super) const TIMER_SLOTS: usize = 4;
 /// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
 pub(super) const TIMER_GAP_MS: f32 = 2.0;
 
-/// A frame's GPU time (ms) from its slot's timestamps (trace, post, a free pair, particle pass pairs; zero: not run):
-/// from its first pass (particles or trace) to the end of its post pass. The post pass follows the trace's command
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, the emitter weights', particle pass pairs; zero:
+/// not run): from its first pass (particles, the emitters' weights or trace) to the end of its post pass. The post pass follows the trace's command
 /// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
 /// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
 /// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
 /// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
 /// its passes, the further traces at the first one's length.
 pub(super) fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
-    let start = [t[6], t[0]].into_iter().filter(|&v| v > 0).min()?;
+    let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
     if t[3] <= start {
         return None;
     }
@@ -45,7 +45,7 @@ impl FrameTimer {
     pub(super) fn new(d: &wgpu::Device) -> FrameTimer {
         let n = TIMER_SLOTS as u64;
         FrameTimer {
-            // Per slot: trace pass begin / end, post pass begin / end, a free pair, particle pass begin / end
+            // Per slot: trace pass begin / end, post pass begin / end, the emitter weights', particle pass begin / end
             // (Metal writes a pass's timestamps in pairs).
             queries: d.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame timer"), ty: wgpu::QueryType::Timestamp, count: (n * 8) as u32 }),
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
@@ -173,20 +173,15 @@ impl LiveCore {
         b.emit_power[1] = cull;
         b.emit_power[2] = cull * EMITTER_CULL_VIEW;
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, cone];
-        // Power edits held back for the emitter worker land first (its job in flight was built for the old reference:
-        // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
-        self.land_powers_now();
-        let (e, b) = (&self.sc.tables, &mut self.sc.base);
-        let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref()), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
-        self.sc.up.heap.write(&self.g.queue, Table::Emitters, 0, bytemuck::cast_slice(&em));
-        b.misc[1] = total;
-        b.emit_power[0] = power;
+        // The weights carry the factor: made again from the new reference.
+        self.weights_dirty = true;
     }
 
     pub fn render(&mut self, spp: u32, extra: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::Buffer)) {
         // A dynamic sky's bake that finished since the last frame (time of day).
         self.take_sky();
-        self.take_emitters();
+        // Runs of the light list retired since the last frame: their records say so, and the weights follow.
+        self.weights_dirty |= self.flush_retired();
         // Settings a game or page requested since the last frame.
         if let Some(r) = self.rendering_control.as_ref().and_then(|c| c.take()) { self.set_rendering(r); }
         let (w, h) = (self.w, self.h);
@@ -312,6 +307,8 @@ impl LiveCore {
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         // Something moves (triangles re-transformed, instances' transforms): the kernel writes motion vectors.
         let moving = self.sc.moving_instances || gpu::Gpu::particle_meshes(&self.sc.up);
+        // (Whether this frame's first sample ran the emitter weight passes with their timestamps.)
+        let mut weighed = false;
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
             p.motion[1] = reconstruction.raw_signal() as u32 as f32;
@@ -386,6 +383,16 @@ impl LiveCore {
             if let (Some(f), 0) = (&self.sc.up.fills.particles, k) {
                 g.fill_emitters(f, &mut e);
             }
+            // The emitters' weights again, when something they are made of changed.
+            if k == 0 && std::mem::take(&mut self.weights_dirty) && !self.sc.tables.emitter_tris.is_empty() {
+                let (t, b) = (&self.sc.tables, &self.sc.base);
+                let ts = match (&self.profile, &self.timer, timed) {
+                    (None, Some(t), Some(slot)) => Some((&t.queries, slot as u32 * 8 + 4)),
+                    _ => None,
+                };
+                weighed = ts.is_some();
+                g.weigh_emitters(&self.sc.up, &mut self.weights, t.emitter_tris.len() as u32, t.light_tree.as_ref(), t.stride as u32, b.light_lod, crate::EmitterCull::of(b), &mut e, ts);
+            }
             {
                 let tw = match (&self.profile, &self.timer, timed) {
                     (Some(p), _, _) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(0), end_of_pass_write_index: Some(1) }),
@@ -443,8 +450,8 @@ impl LiveCore {
                 let at = slot as u64 * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
                 e.resolve_query_set(&t.queries, q..q + 2, &t.resolve, at);
                 e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, 0, 16);
-                // The free pair and the particle pair (pairs 2 and 3); zeros when the pass did not run.
-                for (pair, ran) in [(2u32, false), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
+                // The emitter weights' pair and the particle pair (pairs 2 and 3); zeros when the pass did not run.
+                for (pair, ran) in [(2u32, weighed), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
                     let at = at + pair as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
                     if ran {
                         e.resolve_query_set(&t.queries, q + pair * 2..q + pair * 2 + 2, &t.resolve, at);

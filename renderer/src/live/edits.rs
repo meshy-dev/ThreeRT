@@ -1119,9 +1119,14 @@ impl LiveCore {
         if d.materials || d.emitters || std::mem::take(&mut self.emitters_reweigh) {
             let mut new = self.add_material_emitters();
             new.append(&mut self.pending_emitters);
-            self.write_emitters(&new);
-        } else if d.deferred {
-            self.send_powers();
+            // New records, or a tree that has had emitters added in place (its slot is grown again over those that
+            // weigh something): the table's order and the tree, on the CPU. Any other edit changes weights alone,
+            // which the GPU makes again (`weights_dirty`).
+            self.slot_used |= !new.is_empty();
+            if self.slot_used {
+                self.write_emitters(&new);
+            }
+            self.weights_dirty = true;
         }
         if d.materials || changes.environment {
             // (Fog or a background appearing, a clear coat: the kernel's variant with it, compiled once, then cached.)
@@ -1362,7 +1367,7 @@ impl LiveCore {
         let inst = &mut instances[r as usize];
         for j in old {
             let e = crate::EmitterTri { moves: true, in_tree: false, ..tables.emitter_tris[j] };
-            tables.emitter_tris[j].area = 0.0;
+            tables.retire(j..j + 1);
             let w = pool_tris[e.tri as usize].map(|v| glam::Vec3A::from(to.transform_point3(v.into())));
             self.pending_emitters.push((tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, w, 0)));
             tables.emitter_tris.push(e);
@@ -1927,9 +1932,7 @@ impl LiveCore {
                 let starts = scene::section_emitters(sects, &mine, &tables.materials);
                 let n = scene::rows_emitters(sects, &mine, &tables.materials);
                 let old = emitter_run(&tables.emitter_tris, instances, r as u32);
-                for e in &mut tables.emitter_tris[old] {
-                    e.area = 0.0;
-                }
+                tables.retire(old);
                 let first = tables.emitter_tris.len() as u32;
                 instances[r].first_emitter = first;
                 for (s, start) in starts.iter().enumerate() {
@@ -1963,7 +1966,9 @@ impl LiveCore {
     /// grow (and the scene bind group is made again) when entries were added past them: a scene that adds none keeps
     /// its layout.
     pub(super) fn write_emitters(&mut self, new: &[(u32, crate::GpuEmitterTri)]) {
-        self.land_powers_now();
+        // (The table and the tree as the CPU makes them, from its own areas: the GPU makes the weights again after.)
+        self.weights_dirty = true;
+        self.slot_used |= !new.is_empty();
         let LoadedScene { tables: e, base: b, pool_tris, instances, codes_sent: sent, .. } = &mut self.sc;
         let size = std::mem::size_of::<crate::GpuEmitterTri>();
         let mut w_tris = Gather::default();
@@ -2017,11 +2022,27 @@ impl LiveCore {
         self.put_emitters(&em, total, power);
         // (After `put_emitters`: the list's room for them is there.)
         w_tris.flush_section(&self.g.queue, &self.sc.up.heap, Table::EmitterTris);
-        // Emitters added in place since the worker was made: another, over them.
-        if self.sc.emit.as_ref().is_some_and(|w| w.count != self.sc.tables.emitter_tris.len()) {
-            self.sc.emit = EmitterWorker::new(&self.sc.tables, &self.g.device);
-            self.sc.tables.defer_powers = self.sc.emit.is_some();
+    }
+
+    /// The runs retired since the last frame (`Tables::retire`): their records' `EMITTER_GONE`, but for a record
+    /// given to another emitter since (it has an area again). True if any was written.
+    pub(super) fn flush_retired(&mut self) -> bool {
+        let t = &mut self.sc.tables;
+        if t.retired.is_empty() {
+            return false;
         }
+        let (size, at) = (std::mem::size_of::<crate::GpuEmitterTri>(), std::mem::offset_of!(crate::GpuEmitterTri, flags));
+        let mut w = Gather::default();
+        for run in std::mem::take(&mut t.retired) {
+            for i in run {
+                let e = &t.emitter_tris[i];
+                if e.area == 0.0 {
+                    w.put((i * size + at) as u64, bytemuck::bytes_of(&(crate::emitter_flags(e) | crate::EMITTER_GONE)));
+                }
+            }
+        }
+        w.flush_section(&self.g.queue, &self.sc.up.heap, Table::EmitterTris);
+        true
     }
 
     /// The emitter CDF `em` (its total weight and the emitters' power) and the light tree's nodes into their tables,
@@ -2050,99 +2071,21 @@ impl LiveCore {
 
     /// The kernel's emitter parameters for a CDF of this total weight (and the emitters' power) and the tree.
     pub(super) fn emitter_params(&mut self, total: f32, power: f32) {
-        let LoadedScene { tables: e, base: b, .. } = &mut self.sc;
+        let LoadedScene { tables: e, base: b, up, .. } = &mut self.sc;
         b.emit_power[0] = power;
-        b.misc[1] = total;
+        let mut tail = 0.0;
         if let Some(t) = e.light_tree.as_ref() {
             // The tree's entries (with the slot: the static ones and those added in place), the rest by power share.
             if t.dynamic.is_some() {
                 b.ltree[1] = f32::from_bits(t.order.len() as u32);
             }
-            b.ltree[2] = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
+            tail = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
         }
-        b.counts[1] = if total > 0.0 { e.emitter_tris.len() as u32 } else { 0 };
-    }
-
-    /// Power edits held back (`Tables::deferred`) to the emitter worker, unless it is on a job (they go with the next,
-    /// when that one lands). Lockstep frames wait for the result.
-    pub(super) fn send_powers(&mut self) {
-        let Some(w) = self.sc.emit.as_mut() else { return };
-        if w.flight.is_some() || self.sc.tables.deferred.is_empty() {
-            return;
-        }
-        let e = &mut self.sc.tables;
-        let powers = std::mem::take(&mut e.deferred);
-        let mut objects = e.objects.clone();
-        for &(row, power, _) in &powers {
-            objects[row][3] = power;
-        }
-        let b = &self.sc.base;
-        let job = EmitterJob { materials: e.materials.clone(), objects, lod: b.light_lod, cull: crate::EmitterCull::of(b) };
-        if w.ask.send(job).is_err() {
-            // (The worker is gone: write them now.)
-            e.put_powers(&powers);
-            self.sc.emit = None;
-            e.defer_powers = false;
-            self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-            self.write_emitters(&[]);
-            return;
-        }
-        w.flight = Some(powers);
-        if self.fixed_dt.is_some() {
-            if let Ok(r) = self.sc.emit.as_ref().unwrap().done.recv() {
-                self.land_emitters(r);
-            }
-        }
-    }
-
-    /// The emitter worker's result, if it has one: its edits land with it, and the edits held back since go out.
-    pub(super) fn take_emitters(&mut self) {
-        let Some(r) = self.sc.emit.as_ref().and_then(|w| w.done.try_recv().ok()) else { return };
-        self.land_emitters(r);
-        self.send_powers();
-    }
-
-    /// A job's edits and its emitter CDF and tree powers, together: the objects' powers, the CDF, the tree.
-    pub(super) fn land_emitters(&mut self, r: EmitterBuilt) {
-        let Some(powers) = self.sc.emit.as_mut().and_then(|w| w.flight.take()) else { return };
-        let e = &mut self.sc.tables;
-        e.put_powers(&powers);
-        self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
-        if let Some(t) = e.light_tree.as_mut() {
-            for (n, &p) in t.nodes.iter_mut().zip(&r.node_powers) {
-                n[2] = p;
-            }
-            t.power = t.nodes.first().map_or(0.0, |n| n[2]);
-        }
-        // (Same entries and nodes as the CDF the scene was loaded with: their tables hold them.)
-        let mut enc = self.g.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitters") });
-        let (heap, cdf) = (&self.sc.up.heap, r.entries as u64 * 16);
-        for (t, from, bytes) in [(Table::Emitters, 0, cdf), (Table::LightTree, cdf, r.bytes - cdf)] {
-            if bytes > 0 {
-                enc.copy_buffer_to_buffer(&r.staging, from, &heap.buffer, heap.at(t), bytes.min(heap.cap(t)));
-            }
-        }
-        self.g.queue.submit([enc.finish()]);
-        self.emitter_params(r.total, r.power);
-        self.lit_changed = self.frame.max(1);
-    }
-
-    /// Before another emitter edit (`write_emitters`, a light-LOD rebuild): the job in flight waited for and its result
-    /// dropped, its edits and those held back written into the objects (and uploaded), so the rebuild sees them all.
-    pub(super) fn land_powers_now(&mut self) {
-        let Some(w) = self.sc.emit.as_mut() else { return };
-        let mut powers = vec![];
-        if let Some(f) = w.flight.take() {
-            let _ = w.done.recv();
-            powers = f;
-        }
-        let e = &mut self.sc.tables;
-        powers.append(&mut e.deferred);
-        if !powers.is_empty() {
-            e.put_powers(&powers);
-            self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
-            // The lighting changed (as when a result lands): `live_lighting` for the next 45 frames.
-            self.lit_changed = self.frame.max(1);
+        b.counts[1] = e.emitter_tris.len() as u32;
+        // The table's header (after whatever wrote the table itself): the total and the tail's share.
+        let at = crate::emitter_header(e.emitter_tris.len()) as u64 * 16;
+        if at + 16 <= up.heap.cap(Table::Emitters) {
+            up.heap.write(&self.g.queue, Table::Emitters, at, bytemuck::cast_slice(&[total, tail, 0.0, 0.0]));
         }
     }
 
@@ -2206,7 +2149,7 @@ impl LiveCore {
                 for r in first..first + capacity as usize {
                     let run = emitter_run(&sc.tables.emitter_tris, &sc.instances, r as u32);
                     reweigh |= !run.is_empty();
-                    sc.tables.emitter_tris[run].iter_mut().for_each(|e| e.area = 0.0);
+                    sc.tables.retire(run);
                     let inst = &mut sc.instances[r];
                     let mesh = sc.meshes[inst.mesh as usize];
                     let mut row = scene::row_of(mat, &sc.tables.materials);
@@ -2591,6 +2534,8 @@ impl LiveCore {
         heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));
         heap.write(q, Table::LightTree, 2 * 16, bytemuck::cast_slice(&t.nodes[2..3]));
         heap.write(q, Table::LightTree, t.moving_nodes as u64 * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
+        // (The nodes went with the powers of the CPU's last refit: made again, as the moved emitters' areas are.)
+        self.weights_dirty = true;
     }
 
     /// Copies the GPU's current vertices of deforming meshes to the previous frame's, each where it lies: (its first
@@ -2665,7 +2610,7 @@ impl LiveCore {
         let release = |id: u32, tables: &mut tables::Tables, instances: &[scene::Instance]| -> bool {
             let Some(record) = tables.retained.instance(id).map(|i| i.instance) else { return false };
             let run = emitter_run(&tables.emitter_tris, instances, record);
-            tables.emitter_tris[run.clone()].iter_mut().for_each(|e| e.area = 0.0);
+            tables.retire(run.clone());
             !run.is_empty()
         };
         for id in &ch.removed {
@@ -2678,7 +2623,7 @@ impl LiveCore {
                     // (A copy's emitters go as an instance's do.)
                     let run = emitter_run(&tables.emitter_tris, instances, r as u32);
                     emitters_changed |= !run.is_empty();
-                    tables.emitter_tris[run].iter_mut().for_each(|e| e.area = 0.0);
+                    tables.retire(run);
                     if let Some(i) = instances.get_mut(r) {
                         i.hidden = true;
                     }
@@ -2700,7 +2645,7 @@ impl LiveCore {
                     top.clear(rec);
                     let run = emitter_run(&tables.emitter_tris, instances, rec as u32);
                     emitters_changed |= !run.is_empty();
-                    tables.emitter_tris[run].iter_mut().for_each(|e| e.area = 0.0);
+                    tables.retire(run);
                     if let Some(i) = instances.get_mut(rec) {
                         (i.hidden, i.masked) = (true, false);
                         if edit.in_room(rec) {

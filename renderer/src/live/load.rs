@@ -1,5 +1,5 @@
 //! A scene loaded for the live view (`load_scene`, `LoadedScene`), and the worker threads its loading and its
-//! dynamic sky and emitters use (`DynamicSky`, `EmitterWorker`).
+//! dynamic sky use (`DynamicSky`).
 
 use super::*;
 
@@ -7,7 +7,7 @@ pub(super) struct LoadedScene {
     /// Load phases (parse, bvh, sky, accel build, upload) in ms.
     pub(super) timings: Vec<(String, f64)>,
     /// The meshes' triangles (model space) and their placements, kept on the CPU for picking and selection outlines.
-    /// (A mesh the GPU skins has its build's pose here, but for its triangles that emit, which a new pose places:
+    /// (A mesh the GPU skins has its build's pose here, but for its triangles that which a new pose places:
     /// `repose_skinned`. `LiveCore::mesh_tris` has the mesh as it is now.)
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
     /// The vertices that move, the first and how many (`indexed::Indexed::dynamic`); by skin source, the model's
@@ -59,8 +59,6 @@ pub(super) struct LoadedScene {
     pub(super) volume_fns: Vec<(String, String, String)>,
     /// Where in-place geometry edits write next (`edit_geometry`); a rebuild starts it afresh.
     pub(super) edit: EditState,
-    /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
-    pub(super) emit: Option<EmitterWorker>,
     /// The light list's path codes as the GPU has them (`GpuEmitterTri::code`, by emitter): the upload's, then what
     /// `write_emitters` wrote, which writes only those that changed since.
     pub(super) codes_sent: Vec<u32>,
@@ -140,99 +138,6 @@ impl DynamicSky {
     }
 }
 
-/// Scenes with at least this many emitters rebuild their emitter CDF for power edits on a worker (`EmitterWorker`).
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(super) const ASYNC_EMITTERS: usize = 100_000;
-
-/// Power edits in a scene with many emitters (a city's lamps and windows switching with the clock): the emitter CDF and
-/// the light tree's node powers are rebuilt on a worker thread (~13 ms over 1.4 M emitters, which held up the frame in
-/// `write_emitters`), and the edits land with them, in a later frame (`take_emitters`): the objects' powers, the CDF
-/// and the tree's powers together, so sampling and shading switch at once. The worker writes the CDF and the tree's
-/// nodes into a mapped staging buffer; the frame only copies it on the GPU (a 22 MB `write_buffer` cost it ~5 ms).
-/// Lockstep frames wait for it, so they repeat. Scenes whose emitters change in place (added in place: the tree's slot;
-/// moving emitters, whose nodes the frame refits) keep `write_emitters`; so does any other emitter edit (materials),
-/// which first lands the edits held back.
-pub(super) struct EmitterWorker {
-    pub(super) ask: mpsc::Sender<EmitterJob>,
-    pub(super) done: mpsc::Receiver<EmitterBuilt>,
-    /// The emitters it was made for: a list that grew (added in place) makes another.
-    pub(super) count: usize,
-    /// The edits of the job it is on (they land with its result).
-    pub(super) flight: Option<Vec<(usize, f32, f32)>>,
-}
-
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(super) struct EmitterJob {
-    pub(super) materials: Vec<scene::GpuMaterial>,
-    pub(super) objects: Vec<[f32; 4]>,
-    pub(super) lod: [f32; 4],
-    pub(super) cull: crate::EmitterCull,
-}
-
-pub(super) struct EmitterBuilt {
-    /// The CDF then the tree's nodes, as the emitters buffer holds them (`put_emitters`), and their bytes.
-    pub(super) staging: wgpu::Buffer,
-    pub(super) bytes: u64,
-    /// The CDF's entries (its guide table included).
-    pub(super) entries: usize,
-    pub(super) total: f32,
-    pub(super) power: f32,
-    /// The light tree's node powers (`nodes[i][2]`), for the frame's copy of the tree.
-    pub(super) node_powers: Vec<f32>,
-}
-
-impl EmitterWorker {
-    /// wasm32: none, and power edits rebuild in the frame as before (the browser's WebGPU device and buffers stay on
-    /// the thread that made them).
-    #[cfg(target_arch = "wasm32")]
-    pub(super) fn new(_e: &tables::Tables, _device: &wgpu::Device) -> Option<EmitterWorker> {
-        None
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn new(e: &tables::Tables, device: &wgpu::Device) -> Option<EmitterWorker> {
-        // (Nor where an instance's emitters change in place, an instanced object's copies: the worker weighs its own
-        // copy of the list.)
-        let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0) || e.emitter_tris.iter().any(|t| t.moves && t.inst != crate::NO_INST);
-        if e.emitter_tris.len() < ASYNC_EMITTERS || changing {
-            return None;
-        }
-        let device = device.clone();
-        let (tris, mut tree, stride) = (e.emitter_tris.clone(), e.light_tree.clone(), e.stride);
-        let order = crate::emitter_order(&tris, tree.as_ref());
-        let (ask, asked) = mpsc::channel::<EmitterJob>();
-        let (tx, done) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("emitters".into())
-            .spawn(move || {
-                while let Ok(j) = asked.recv() {
-                    let (em, total, power) = crate::emitter_cdf(&tris, &order, &j.materials, &j.objects, stride, j.lod, j.cull);
-                    let node_powers = tree.as_mut().map_or(vec![], |t| {
-                        let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], &j.materials, &j.objects, stride)).collect();
-                        t.refit(&|k| w[k]);
-                        t.nodes.iter().map(|n| n[2]).collect()
-                    });
-                    let nodes: &[[f32; 4]] = tree.as_ref().map_or(&[], |t| &t.nodes);
-                    let bytes = ((em.len() + nodes.len()) * 16) as u64;
-                    let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitters staging"), size: bytes.max(16), usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: true });
-                    let at = em.len() as u64 * 16;
-                    for (range, data) in [(0..at, bytemuck::cast_slice::<_, u8>(&em)), (at..bytes, bytemuck::cast_slice(nodes))] {
-                        if !data.is_empty() {
-                            let Ok(mut m) = staging.slice(range).get_mapped_range_mut() else { break };
-                            m.copy_from_slice(data);
-                        }
-                    }
-                    staging.unmap();
-                    if tx.send(EmitterBuilt { staging, bytes, entries: em.len(), total, power, node_powers }).is_err() {
-                        break;
-                    }
-                }
-            })
-            .ok()?;
-        Some(EmitterWorker { ask, done, count: e.emitter_tris.len(), flight: None })
-    }
-}
-
 pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32, h: u32, targets: &Targets) -> Result<(LoadedScene, ViewState, Environment)> {
     let t0 = Instant::now();
     let mut sc = scene::build(world, assets, presets, None)?;
@@ -247,8 +152,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");
     tables.moving_mats = std::mem::take(&mut prep.moving_mats);
-    let emit = EmitterWorker::new(&tables, &g.device);
-    tables.defer_powers = emit.is_some();
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty());
     let shaders = sc.shaders.clone();
     let volume_fns = sc.volume_fns.clone();
@@ -327,5 +230,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, edit, emit, codes_sent }, view, env))
+    Ok((LoadedScene { timings, triangles, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, edit, codes_sent }, view, env))
 }

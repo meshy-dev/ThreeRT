@@ -1267,6 +1267,16 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
     }
 }
 
+/// The emitters' total weight as the kernel reads it: the header of their table on the GPU.
+fn kernel_total(c: &LiveCore) -> f32 {
+    let heap = &c.sc.up.heap;
+    let n = c.sc.tables.emitter_tris.len();
+    if n == 0 {
+        return 0.0;
+    }
+    read_back::<[f32; 4]>(c, &heap.buffer, heap.at(Table::Emitters) + crate::emitter_header(n) as u64 * 16, 16)[0][0]
+}
+
 /// A view that took edits in place against one built from the edited world: the emitters that weigh something are as
 /// many, each weighs what a build's does where a build's is, the kernel's total weight is a build's, and so is the
 /// picture after 64 frames.
@@ -1282,10 +1292,13 @@ fn lit_as_a_build(what: &str, live: &mut LiveCore, fresh: &mut LiveCore) {
     for (l, f) in wl.iter().zip(&wf) {
         assert!((l.0 - f.0).abs() <= 1e-5 * f.0 && (Vec3::from(l.1) - Vec3::from(f.1)).length() <= 1e-4, "{what}: an emitter weighs {l:?}, a build's {f:?}");
     }
-    let (tl, tf) = (live.sc.base.misc[1], fresh.sc.base.misc[1]);
-    assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
     forget(live);
     let (a, b) = (picture(live, 64), picture(fresh, 64));
+    // (After a frame: the weights an edit left dirty are made by then.)
+    let (tl, tf) = (kernel_total(live), kernel_total(fresh));
+    assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
+    // (And the build's table, which its first frame made on the GPU, is what the CPU makes of the same scene.)
+    weights_as_the_cpus(&format!("{what}, the build"), fresh);
     assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
 }
 
@@ -1456,7 +1469,6 @@ fn power_edits_keep_the_light_lists_codes() {
                 w.set_transform(14, Vec3::new(-0.35 + 0.1 * k as f32, -0.45, 0.6), glam::Quat::from_rotation_z(0.3 * k as f32), Vec3::ONE).unwrap();
             }
             live.commit(&mut w).unwrap();
-            live.land_powers_now();
             list_is_its_triangles(&what(&format!("power {power}{}", if k > 0 { " and a material that starts emitting" } else { "" })), &live);
         }
         let t = &live.sc.tables;
@@ -5248,4 +5260,119 @@ fn the_fogs_ambient_light_is_seen_directly() {
         let at = on[on.len() / 2] * 4;
         assert!(p[at..at + 3].iter().all(|&c| c > 20), "the black quad in fog is drawn in the fog's colour: {:?}", &p[at..at + 4]);
     }
+}
+
+/// The emitters' table and the light tree's powers as the GPU holds them, against what the CPU makes of the same
+/// scene now (`emitter_cdf`, `LightTree::refit`): every weight, area, cumulative weight, node power and the header;
+/// and the table against itself: the cumulative weights rise to 1, each guide index is the first entry not below its
+/// bucket's start.
+fn weights_as_the_cpus(what: &str, live: &LiveCore) {
+    let (e, b) = (&live.sc.tables, &live.sc.base);
+    let n = e.emitter_tris.len();
+    let order = crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref());
+    let (cdf, total, power) = crate::emitter_cdf(&e.emitter_tris, &order, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
+    let heap = &live.sc.up.heap;
+    let table = read_back::<[f32; 4]>(live, &heap.buffer, heap.at(Table::Emitters), (crate::emitter_header(n) as u64 + 1) * 16);
+    let rel = |x: f32, y: f32| if x == y { 0.0 } else { (x - y).abs() / x.abs().max(y.abs()) };
+    for k in 0..n {
+        let (g, c) = (table[k], cdf[k]);
+        assert_eq!(g[0].to_bits(), c[0].to_bits(), "{what}: entry {k} is its emitter's");
+        assert!(rel(g[2], c[2]) <= 1e-5, "{what}: entry {k} weighs {} on the GPU, {} on the CPU", g[2], c[2]);
+        assert!(c[2] <= 0.0 || rel(g[3], c[3]) <= 1e-5, "{what}: entry {k}'s area {} on the GPU, {} on the CPU", g[3], c[3]);
+        assert!((g[1] - c[1]).abs() <= 1e-5, "{what}: entry {k}'s cumulative weight {} on the GPU, {} on the CPU", g[1], c[1]);
+        assert!(k == 0 || g[1] >= table[k - 1][1], "{what}: the cumulative weights rise at entry {k}");
+    }
+    let head = table[crate::emitter_header(n)];
+    assert!(rel(head[0], total) <= 1e-5, "{what}: the total {} on the GPU, {total} on the CPU", head[0]);
+    if total > 0.0 {
+        assert_eq!(table[n - 1][1], 1.0, "{what}: the cumulative weights end at 1");
+        for k in 0..=crate::EMITTER_GUIDE {
+            let u = k as f32 / crate::EMITTER_GUIDE as f32;
+            let first = table[..n].partition_point(|t| t[1] < u);
+            assert_eq!(table[n + k / 4][k % 4].to_bits() as usize, first, "{what}: guide index {k}");
+        }
+    }
+    let mut tail = 0.0;
+    if let Some(t) = &e.light_tree {
+        let mut t = t.clone();
+        let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&e.emitter_tris[i as usize], &e.materials, &e.objects, e.stride)).collect();
+        t.refit(&|k| w[k]);
+        let nodes = read_back::<[f32; 4]>(live, &heap.buffer, heap.at(Table::LightTree), t.nodes.len() as u64 * 16);
+        for (i, (g, c)) in nodes.iter().zip(&t.nodes).enumerate() {
+            assert!(rel(g[2], c[2]) <= 1e-5, "{what}: node {i}'s power {} on the GPU, {} on the CPU", g[2], c[2]);
+            assert!(g[0].to_bits() == c[0].to_bits() && g[1].to_bits() == c[1].to_bits() && g[3].to_bits() == c[3].to_bits(), "{what}: node {i}'s sphere and children are kept");
+        }
+        tail = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
+    }
+    assert!((head[1] - tail).abs() <= 1e-5, "{what}: the tail's share {} on the GPU, {tail} on the CPU", head[1]);
+}
+
+/// `count` small emitters before a wall, their weights made on the GPU (emitter_weights.wgsl): as loaded, with some
+/// dimmed and some switched off, with all switched off, and back.
+fn weights_on_the_gpu(count: u32) {
+    let mut w = world();
+    for id in [11, 12, 20] {
+        w.set_visible(id, false).unwrap();
+    }
+    w.set_transform(10, Vec3::ZERO, glam::Quat::IDENTITY, Vec3::splat(10.0)).unwrap();
+    let mut seed = 12345u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / 16777216.0
+    };
+    for i in 0..count {
+        w.set_object(100 + i, format!("emitter {i}"), None, Kind::Mesh { geometry: 3, material: 5, own_blas: false, materials: vec![] }, true, false).unwrap();
+        let at = Vec3::new((i % 20) as f32 - 9.5 + (next() - 0.5) * 0.4, (i / 20) as f32 - 9.5 + (next() - 0.5) * 0.4, 0.3);
+        w.set_transform(100 + i, at, glam::Quat::from_rotation_y(3.14159), Vec3::splat(0.05 + 0.1 * next())).unwrap();
+    }
+    let presets = crate::default_presets_dir();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 192, 108)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    assert_eq!(live.sc.tables.light_tree.is_some(), count >= 256, "a light tree from 256 emitters on");
+    w.take_changes();
+    // (As loaded the table is the CPU's: made again once by hand. From then on each edit leaves it to the GPU.)
+    live.weights_dirty = true;
+    picture(&mut live, 1);
+    weights_as_the_cpus("as loaded", &live);
+    let mut edited = |what: &str, w: &mut World, live: &mut LiveCore| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert!(live.weights_dirty, "{what}: the weights are to be made again");
+        picture(live, 1);
+        weights_as_the_cpus(what, live);
+    };
+    for i in 0..count {
+        if i % 3 == 0 {
+            w.set_power(100 + i, if i % 2 == 0 { 0.25 } else { 0.0 }).unwrap();
+        }
+    }
+    edited("some dimmed, some off", &mut w, &mut live);
+    for i in 0..count {
+        w.set_power(100 + i, 0.0).unwrap();
+    }
+    edited("all off", &mut w, &mut live);
+    assert_eq!(kernel_total(&live), 0.0, "all off: nothing weighs");
+    for i in 0..count {
+        w.set_power(100 + i, 1.0 + (i % 5) as f32).unwrap();
+    }
+    edited("back on", &mut w, &mut live);
+    // Their material brighter, and of another colour.
+    w.set_material(5, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.0, 0.0, 0.0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1.0, 0.5, 0.2], "emissiveIntensity": 90.0, "doubleSided": true })).unwrap());
+    edited("the material brighter", &mut w, &mut live);
+    // Some removed: their runs are retired.
+    for i in (0..count).step_by(7) {
+        w.remove(100 + i);
+    }
+    edited("some removed", &mut w, &mut live);
+}
+
+#[test]
+fn the_gpu_weighs_the_emitters_as_the_cpu_does() {
+    weights_on_the_gpu(400);
+}
+
+#[test]
+fn the_gpu_weighs_the_emitters_as_the_cpu_does_without_a_tree() {
+    weights_on_the_gpu(100);
 }

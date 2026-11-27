@@ -159,9 +159,8 @@ export function sceneFor(id: string) {
       const win = new GLTFModel(`assets/city/glb/${area.area}/${t.file}`, { nodes: [node] });
       win.name = `windows ${t.x} ${t.z} ${g}`;
       scene.add(win);
-      // A group switches on every tile in the same frame: any power change costs the live view's commit ~13 ms (the
-      // emitter CDF and the light tree rebuilt over all 1.4 M emitters, renderer/src/live/edits.rs write_emitters), so fewer
-      // switching frames is better until that is incremental.
+      // A group switches on every tile in the same frame. (When this was written a power change rebuilt the emitters'
+      // table on the CPU; the GPU makes it again now, in the frame of the change.)
       lamps.push({ name: win.name, at: windowSwitchAt(g) });
     }
   }
