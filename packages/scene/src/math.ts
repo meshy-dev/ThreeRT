@@ -1691,6 +1691,64 @@ export class Plane {
   }
 }
 
+/** A line segment from `start` to `end` (three.js Line3). */
+export class Line3 {
+  start: Vector3;
+  end: Vector3;
+  constructor(start = new Vector3(), end = new Vector3()) {
+    this.start = start;
+    this.end = end;
+  }
+  set(start: Vector3, end: Vector3): this {
+    this.start.copy(start);
+    this.end.copy(end);
+    return this;
+  }
+  copy(line: Line3): this {
+    return this.set(line.start, line.end);
+  }
+  clone(): Line3 {
+    return new Line3().copy(this);
+  }
+  getCenter(target = new Vector3()): Vector3 {
+    return target.set((this.start.x + this.end.x) / 2, (this.start.y + this.end.y) / 2, (this.start.z + this.end.z) / 2);
+  }
+  /** `end - start`. */
+  delta(target = new Vector3()): Vector3 {
+    return target.subVectors(this.end, this.start);
+  }
+  distanceSq(): number {
+    return this.delta().lengthSq();
+  }
+  distance(): number {
+    return this.start.distanceTo(this.end);
+  }
+  /** The point at `t` along the segment: `start` at 0, `end` at 1, extrapolated outside them. */
+  at(t: number, target = new Vector3()): Vector3 {
+    return this.delta(target).multiplyScalar(t).add(this.start);
+  }
+  /** The `t` of the point on the line nearest `point`, kept in 0..1 when `clampToLine`; 0 for a zero-length segment. */
+  closestPointToPointParameter(point: Vector3, clampToLine = false): number {
+    const d = this.delta();
+    const dd = d.dot(d);
+    if (dd === 0) return 0;
+    const t = d.dot(new Vector3().subVectors(point, this.start)) / dd;
+    return clampToLine ? Math.min(1, Math.max(0, t)) : t;
+  }
+  closestPointToPoint(point: Vector3, clampToLine = false, target = new Vector3()): Vector3 {
+    return this.at(this.closestPointToPointParameter(point, clampToLine), target);
+  }
+  applyMatrix4(m: Matrix4): this {
+    this.start.applyMatrix4(m);
+    this.end.applyMatrix4(m);
+    return this;
+  }
+  equals(line: Line3): boolean {
+    const a = this.start, b = line.start, c = this.end, d = line.end;
+    return a.x === b.x && a.y === b.y && a.z === b.z && c.x === d.x && c.y === d.y && c.z === d.z;
+  }
+}
+
 export function srgbToLinear(c: number): number {
   return c < 0.04045 ? c * 0.0773993808 : Math.pow(c * 0.9478672986 + 0.0521327014, 2.4);
 }
