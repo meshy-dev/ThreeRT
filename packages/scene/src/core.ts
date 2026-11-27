@@ -933,6 +933,102 @@ export class Group extends Object3D {
   override type = "Group";
 }
 
+/** One level of a `LOD`: its object, the camera distance from which it is shown, and the hysteresis of that switch. */
+export interface LODLevel {
+  object: Object3D;
+  distance: number;
+  /** A fraction of `distance` (three.js): a shown level stays until the camera is that much nearer than its distance. */
+  hysteresis: number;
+}
+
+const _lodCamera = new Vector3();
+const _lodSelf = new Vector3();
+
+/**
+ * Levels of detail (three.js `LOD`): children shown one at a time by the camera's distance. The binding updates each
+ * `autoUpdate` LOD at every sync, as three.js's renderer does at every render, before it sends what changed. A level's
+ * `hysteresis` keeps a camera that hovers at the switch distance from flipping levels every frame: once shown, a level
+ * holds until the camera comes `hysteresis * distance` nearer (a path-traced swap that flips each frame keeps the
+ * temporal denoiser from ever converging there).
+ */
+export class LOD extends Object3D {
+  readonly isLOD = true;
+  override type = "LOD";
+  /** The levels, nearest first. */
+  levels: LODLevel[] = [];
+  /** Updated by the binding at every sync (three.js: by the renderer at every render). */
+  autoUpdate = true;
+  private _currentLevel = 0;
+
+  /** Adds `object` as a level shown from `distance` (its absolute value) on, kept in order of distance. */
+  addLevel(object: Object3D, distance = 0, hysteresis = 0): this {
+    distance = Math.abs(distance);
+    const levels = this.levels;
+    let l = 0;
+    while (l < levels.length && distance >= levels[l].distance) l++;
+    levels.splice(l, 0, { distance, hysteresis, object });
+    this.add(object);
+    return this;
+  }
+
+  /** Takes out the level at `distance` (and its object); whether there was one. */
+  removeLevel(distance: number): boolean {
+    const i = this.levels.findIndex((l) => l.distance === distance);
+    if (i < 0) return false;
+    const [removed] = this.levels.splice(i, 1);
+    this.remove(removed.object);
+    return true;
+  }
+
+  /** The index of the level the last `update` showed. */
+  getCurrentLevel(): number {
+    return this._currentLevel;
+  }
+
+  /** The level's object for a camera at `distance`, the hysteresis of the levels shown now taken into account. */
+  getObjectForDistance(distance: number): Object3D | null {
+    const levels = this.levels;
+    if (levels.length === 0) return null;
+    let i = 1;
+    for (; i < levels.length; i++) if (distance < this.switchDistance(i)) break;
+    return levels[i - 1].object;
+  }
+
+  /** Shows the level for `camera`'s distance (divided by its `zoom`, if it has one) and hides the others. */
+  update(camera: Object3D): void {
+    const levels = this.levels;
+    if (levels.length <= 1) return;
+    camera.getWorldPosition(_lodCamera);
+    this.getWorldPosition(_lodSelf);
+    const zoom = (camera as { zoom?: number }).zoom;
+    const distance = _lodCamera.distanceTo(_lodSelf) / (zoom && zoom > 0 ? zoom : 1);
+    let i = 1;
+    for (; i < levels.length; i++) if (distance < this.switchDistance(i)) break;
+    this._currentLevel = i - 1;
+    for (let j = 0; j < levels.length; j++) {
+      const shown = j === i - 1;
+      if (levels[j].object.visible !== shown) levels[j].object.visible = shown;
+    }
+  }
+
+  /** Level `i`'s distance, less its hysteresis while it is shown. */
+  private switchDistance(i: number): number {
+    const l = this.levels[i];
+    return l.object.visible ? l.distance - l.distance * l.hysteresis : l.distance;
+  }
+
+  /** As three.js: the levels cloned (the other children are not). */
+  override copy(source: Object3D, _recursive = true): this {
+    super.copy(source, false);
+    if (source instanceof LOD) {
+      this.levels = [];
+      for (const l of source.levels) this.addLevel(l.object.clone(), l.distance, l.hysteresis);
+      this.autoUpdate = source.autoUpdate;
+    }
+    return this;
+  }
+}
+
 /** A joint's motor: it drives the joint toward `velocity` (rad/s, or m/s for a slider) with at most `maxForce`. */
 export interface JointMotor {
   velocity: number;

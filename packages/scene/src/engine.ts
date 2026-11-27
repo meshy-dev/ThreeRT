@@ -11,7 +11,7 @@ import {
   AmbientLight, compatNote, DirectionalLight, Fog, FogExp2, GLTFModel, HDRIEnvironment, HemisphereLight, InstancedMesh, Light, MeshBasicMaterial, MaterialFunction, Mesh, MeshPhysicalMaterial, type MeshStandardMaterial, Object3D,
   type ParticleBinding, type ParticleFunction, Particles, GpuParticles, type ParticleProgram, type ParticleProgramBinding, type VolumeBinding, type VolumeFunction, VolumeMesh, type DensityGrid, type GridProgram, type GridProgramBinding, ProceduralMesh, ProceduralGeometry,
   DataTexture, StreamTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
-  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, getEngineBodies,
+  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, getEngineBodies, LOD,
   type SceneChanges, type ShaderBinding, type SwayDesc, type PhysicsDesc, type BoundBody,
 } from "./core.ts";
 import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
@@ -358,6 +358,8 @@ export class SceneBinding {
   private readonly gridCode = new Map<string, string>();
   private readonly lights = new Map<Light, Bound>();
   private readonly cameras = new Map<PerspectiveCamera, Bound>();
+  /** The scene's LODs, each updated for the camera at every sync (three.js's renderer: at every render). */
+  private readonly lods = new Set<LOD>();
   private envKey = "";
   private settingsKey = "";
   private readonly trs = new Float32Array(10);
@@ -423,6 +425,9 @@ export class SceneBinding {
   sync(): SyncStats {
     const stats: SyncStats = { created: 0, updated: 0, removed: 0 };
     const ch = this.changes;
+    // Levels of detail first, so what they show and hide is sent with the rest (a LOD new to the engine is updated
+    // when it is bound, before its levels).
+    for (const l of this.lods) if (l.autoUpdate) l.update(this.camera);
     for (const o of this.manualWorld) ch.objects.add(o);
     if (ch.structure || !this.objects.has(this.camera)) {
       // The whole graph: walk it (creates new objects, re-parents, removes what is gone).
@@ -586,6 +591,7 @@ export class SceneBinding {
     if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
     if (o instanceof Light) this.lights.delete(o);
     if (o instanceof PerspectiveCamera) this.cameras.delete(o);
+    if (o instanceof LOD) this.lods.delete(o);
     stats.removed++;
   }
 
@@ -601,6 +607,10 @@ export class SceneBinding {
         this.byName.set(name, o);
         if (o instanceof Light) this.lights.set(o, b);
         if (o instanceof PerspectiveCamera) this.cameras.set(o, b);
+        if (o instanceof LOD) {
+          this.lods.add(o);
+          if (o.autoUpdate) o.update(this.camera);
+        }
       }
       b.parent = parent;
       b.kind = kind;

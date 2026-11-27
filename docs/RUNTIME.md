@@ -947,6 +947,11 @@ reads files under the asset root as it goes and adds what they hold without rebu
   `InstancedMesh` a piece and material a cell: their triangles once, a few objects a cell. TokyoRT's Shinjuku
   streams 470,000 instances at a commit of 4.9 ms.
 - `THREERT_EDIT_LOG=1` prints where an edit or a world change decided on a rebuild.
+- **Levels of detail** (`LOD`, as three.js): the binding updates each `autoUpdate` LOD for the camera at every sync,
+  before it sends what changed, so a swap is two visibility changes. Give a level `hysteresis` (`addLevel(o, 50,
+  0.1)`): once shown it holds until the camera is 10 % nearer, so a camera hovering at a switch distance swaps once,
+  not every frame (each swap restarts the temporal history there). A new LOD is updated as it is bound, so its other
+  levels are hidden at build: see "Rebuilds" above.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
