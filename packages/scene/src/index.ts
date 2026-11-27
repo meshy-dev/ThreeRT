@@ -12,3 +12,6 @@ export * from "./effects.ts";
 export * from "./procedural.ts";
 export * from "./compat.ts";
 export * from "./raycaster.ts";
+export * from "./animation.ts";
+export * from "./animation.ts";
+export { AnimationMixer, AnimationAction, PropertyBinding, PropertyMixer, type AnimationMixerEvent, type ParsedTrackName } from "./animation-mixer.ts";
