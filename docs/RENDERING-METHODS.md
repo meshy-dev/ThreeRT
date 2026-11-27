@@ -13,7 +13,7 @@ ThreeRT is one engine with **two rendering methods**, chosen per project and per
 | Scene code | `@threert/scene` (physical units) | plain three.js + TSL node materials |
 | GPU | ray-tracing hardware (Apple M-series, RTX, RDNA2+) | any GPU wgpu supports (Metal, Vulkan, D3D12) |
 | Interface | the game HUD (`docs/RUNTIME.md` "HUD") | PocketJS (Solid JSX + Tailwind) drawn by PocketJS's wgpu renderer over the 3D frame |
-| Download | the ThreeRT clients | an app of 10 MB installed, 5 MB to download (the Pocket Island desktop app, below) |
+| Download | the ThreeRT clients | an app of 10 MB installed, 4.5 MB to download (the Pocket Island desktop app, below) |
 | For | the look: production scenes lit by traced light at 60 fps | apps and games that ship small and run everywhere, with three.js's look |
 
 The pairing follows Godot (Forward+ / Mobile / Compatibility) and Unreal (Lumen / Path Tracer): one engine,
@@ -28,8 +28,8 @@ three.js promise — the scene as written, on any GPU, in a native app a fractio
 
 - Pocket Island's desktop app moved from Electron (Chromium + Node) to this runtime
   (pocket-nexus/pocket-agents-island#28; measurements in its `apps/desktop/REPORT.md`, Apple M5):
-  35.7 % of a core in the foreground against Electron's 64.7 %, 479 MB RSS against 1016 MB, 10.2 MB
-  installed against 446 MB, 5.0 MB to download against 170 MB. The native WebGPU binding renders
+  34.7 % of a core in the foreground against Electron's 64.8 %, 471 MB RSS against 1007 MB, 9.9 MB
+  installed against 445 MB, 4.5 MB to download against 170 MB. The native WebGPU binding renders
   three.js pages identically to Chrome's WebGPU (mean difference 0.000 / 255 on its test scenes).
 - A three.js developer gets a native build of their scene without rewriting it for `@threert/scene`, and
   can later move the parts that should be traced to the Path Traced method.
