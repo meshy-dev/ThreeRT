@@ -70,6 +70,8 @@ pub struct LightTree {
     pub code: Vec<u32>,
     /// Total power of the tree's emitters.
     pub power: f32,
+    /// Counts the times its nodes were grown again (`set_dynamic`): what reads the topology knows it is another.
+    pub structure: u32,
     /// The moving emitters' subtree (node 2, under the root; none without moving emitters): its entries
     /// `moving_first..moving_first + moving_count` (after the static ones), its nodes below node 2 from `moving_nodes`.
     pub moving_first: u32,
@@ -223,6 +225,34 @@ impl LightTree {
         Ok(deepest as usize)
     }
 
+    /// The nodes by depth, the deepest first, and each depth's count: the order a bottom-up sum of the powers takes
+    /// them in (emitter_weights.wgsl `tree`). Without the leaves over nothing (the empty slot: its word names no
+    /// entry of its own, its power stays 0).
+    pub fn levels(&self) -> (Vec<u32>, Vec<u32>) {
+        let n = self.nodes.len();
+        let mut depth = vec![u32::MAX; n];
+        if n > 0 {
+            depth[0] = 0;
+        }
+        for i in 0..n {
+            let w = self.nodes[i][3].to_bits();
+            if depth[i] != u32::MAX && w & LEAF == 0 && (w as usize + 1) < n {
+                (depth[w as usize], depth[w as usize + 1]) = (depth[i] + 1, depth[i] + 1);
+            }
+        }
+        let empty = |i: usize| self.nodes[i][3].to_bits() & LEAF != 0 && self.ranges[i].0 == self.ranges[i].1;
+        let mut list: Vec<u32> = (0..n as u32).filter(|&i| depth[i as usize] != u32::MAX && !empty(i as usize)).collect();
+        list.sort_by_key(|&i| std::cmp::Reverse(depth[i as usize]));
+        let mut counts: Vec<u32> = vec![];
+        for (k, &i) in list.iter().enumerate() {
+            if k == 0 || depth[i as usize] != depth[list[k - 1] as usize] {
+                counts.push(0);
+            }
+            *counts.last_mut().unwrap() += 1;
+        }
+        (list, counts)
+    }
+
     /// Node powers again from the entries' weights (power / material edits; `weight(k)` of entry k = position in
     /// `order`): same topology, sums bottom-up (children come after their parent).
     pub fn refit(&mut self, weight: &dyn Fn(usize) -> f32) {
@@ -297,6 +327,7 @@ impl LightTree {
     /// their codes in `code`; the root's power the sum again. The static subtree, its entries and codes are kept.
     pub fn set_dynamic(&mut self, items: Vec<DynItem>) {
         let Some((fixed, ns)) = self.dynamic else { return };
+        self.structure = self.structure.wrapping_add(1);
         let ns = ns as usize;
         self.nodes.truncate(fixed);
         self.ranges.truncate(fixed);

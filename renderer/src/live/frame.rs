@@ -387,6 +387,11 @@ impl LiveCore {
             if let (Some(f), 0) = (&self.sc.up.fills.particles, k) {
                 g.fill_emitters(f, &mut e);
             }
+            // The emitters' weights again, when something they are made of changed.
+            if k == 0 && std::mem::take(&mut self.weights_dirty) {
+                let (t, b) = (&self.sc.tables, &self.sc.base);
+                g.weigh_emitters(&self.sc.up, &mut self.weights, t.emitter_tris.len() as u32, t.light_tree.as_ref(), t.stride as u32, b.light_lod, crate::EmitterCull::of(b), &mut e);
+            }
             {
                 let tw = match (&self.profile, &self.timer, timed) {
                     (Some(p), _, _) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(0), end_of_pass_write_index: Some(1) }),
