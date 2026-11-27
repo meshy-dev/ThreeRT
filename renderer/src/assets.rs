@@ -7,8 +7,9 @@
 //! threads of their own, at most `MAX_ASSETS` at once, the rest in the order they came.
 //!
 //! What a game may reach is the embedding app's to decide: by default `https://` only, anywhere. An app with a network
-//! policy gives its own check of an address (`with_policy`) and, to hold every address a name resolves to and every
-//! redirect to it as well, its own HTTP agent (`with_agent`: a `ureq::Agent` with the app's resolver, for one).
+//! policy gives its own check of an address (`with_policy`), which every redirect is held to as well (the fetcher
+//! follows them itself, one at a time), and, to hold every address a name resolves to, its own HTTP agent
+//! (`with_agent`: a `ureq::Agent` with the app's resolver, for one).
 //! `threert-render play` (src/net.rs) allows `http://` too: whoever runs it chose the game.
 //!
 //! Behind the `assets` cargo feature (ureq on rustls; on with `net`, and so by default).
@@ -26,6 +27,8 @@ pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET: u64 = 64 << 20;
 /// A download in all; its connection.
 const DOWNLOAD: Duration = Duration::from_secs(300);
+/// Redirects a download follows, each one checked by the policy.
+const REDIRECTS: usize = 5;
 const CONNECT: Duration = Duration::from_secs(10);
 
 /// Whether a game may download from an address: `Err` says why not (the answer's `error`).
@@ -73,6 +76,7 @@ struct Job {
     path: String,
     file: PathBuf,
     sha256: Option<String>,
+    policy: Policy,
 }
 
 fn answer(job: &Job, status: u16, size: u64, cached: bool) -> Value {
@@ -96,15 +100,53 @@ fn cached(job: &Job) -> Option<Value> {
     same.then(|| answer(job, 200, size, true))
 }
 
+/// The address a redirect's `Location` names, from the address that answered it: absolute (`scheme://...`), from the
+/// host's root (`/...`), from the scheme (`//host/...`), or beside the answering path. None for one this can't read.
+fn redirect_to(from: &str, location: &str) -> Option<String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return None;
+    }
+    let scheme_end = from.find("://")?;
+    if location.split(['/', '?', '#']).next().is_some_and(|head| head.contains(':')) {
+        return Some(location.to_string());
+    }
+    if location.starts_with("//") {
+        return Some(format!("{}:{location}", &from[..scheme_end]));
+    }
+    let after = scheme_end + 3;
+    let host_end = from[after..].find(['/', '?', '#']).map_or(from.len(), |i| after + i);
+    if location.starts_with('/') {
+        return Some(format!("{}{location}", &from[..host_end]));
+    }
+    let path = &from[host_end..from[host_end..].find(['?', '#']).map_or(from.len(), |i| host_end + i)];
+    let dir = path.rfind('/').map_or("/", |i| &path[..=i]);
+    Some(format!("{}{dir}{location}", &from[..host_end]))
+}
+
 /// A download: the body into `<file>.part` (its size and, when asked, its sha256 checked), renamed to the file and
 /// recorded beside it. A status other than 200 writes nothing and is answered as it is.
 fn download(agent: &ureq::Agent, job: &Job, cancel: &AtomicBool) -> Value {
     use sha2::Digest;
     use std::io::{Read, Write};
     let fail = |why: String| failed(&job.id, &job.path, &why);
-    let mut response = match agent.get(&job.url).call() {
-        Ok(r) => r,
-        Err(e) => return fail(format!("{}: {e}", job.url)),
+    // (Redirects one at a time, so that the policy sees each address, not only the first.)
+    let mut url = job.url.clone();
+    let mut hops = 0;
+    let mut response = loop {
+        let r = match agent.get(&url).call() {
+            Ok(r) => r,
+            Err(e) => return fail(format!("{url}: {e}")),
+        };
+        let location = r.headers().get("location").and_then(|l| l.to_str().ok());
+        let Some(next) = location.filter(|_| r.status().is_redirection()).and_then(|l| redirect_to(&url, l)) else { break r };
+        if hops == REDIRECTS {
+            return fail(format!("{}: more than {REDIRECTS} redirects", job.url));
+        }
+        if let Err(e) = (job.policy)(&next) {
+            return fail(format!("{} redirects to {e}", job.url));
+        }
+        (url, hops) = (next, hops + 1);
     };
     let status = response.status().as_u16();
     if status != 200 {
@@ -124,13 +166,13 @@ fn download(agent: &ureq::Agent, job: &Job, cancel: &AtomicBool) -> Value {
             if cancel.load(Ordering::Relaxed) {
                 return Err("canceled".into());
             }
-            let n = body.read(&mut buf).map_err(|e| if size >= MAX_ASSET { format!("{}: larger than 64 MiB", job.url) } else { format!("{}: {e}", job.url) })?;
+            let n = body.read(&mut buf).map_err(|e| if size >= MAX_ASSET { format!("{url}: larger than 64 MiB") } else { format!("{url}: {e}") })?;
             if n == 0 {
                 break;
             }
             size += n as u64;
             if size > MAX_ASSET {
-                return Err(format!("{}: larger than 64 MiB", job.url));
+                return Err(format!("{url}: larger than 64 MiB"));
             }
             hash.update(&buf[..n]);
             out.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", job.path))?;
@@ -189,7 +231,7 @@ impl AssetFetcher {
     pub fn new(root: PathBuf) -> AssetFetcher {
         // (The TLS provider of this process, if nobody installed one.)
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let agent = ureq::Agent::config_builder().timeout_connect(Some(CONNECT)).timeout_global(Some(DOWNLOAD)).http_status_as_error(false).max_redirects(5).build().into();
+        let agent = ureq::Agent::config_builder().timeout_connect(Some(CONNECT)).timeout_global(Some(DOWNLOAD)).http_status_as_error(false).max_redirects(0).build().into();
         let (tx, rx) = mpsc::channel();
         AssetFetcher { root, policy: https_only(), agent, tx, rx, waiting: VecDeque::new(), running: HashMap::new(), counts: AssetCounts::default() }
     }
@@ -200,8 +242,10 @@ impl AssetFetcher {
         self
     }
 
-    /// The HTTP agent the downloads use: the app's own (its resolver, its proxy, its redirect rule). It should not
-    /// turn statuses into errors (`http_status_as_error(false)`), so that a 404 is answered as one.
+    /// The HTTP agent the downloads use: the app's own (its resolver, its proxy). It should not turn statuses into
+    /// errors (`http_status_as_error(false)`), so that a 404 is answered as one, and should follow no redirects
+    /// (`max_redirects(0)`), so that the fetcher follows them with the policy checked at each (ones the agent follows
+    /// itself are the agent's to check).
     pub fn with_agent(mut self, agent: ureq::Agent) -> AssetFetcher {
         self.agent = agent;
         self
@@ -222,6 +266,12 @@ impl AssetFetcher {
 
     fn fetch(&mut self, id: Value, m: &Value) {
         self.counts.requests += 1;
+        // (An id under way or waiting already: this one is not answered, the first is. Checked before a refusal, whose
+        // answer would otherwise stand for the first.)
+        let k = key(&id);
+        if self.running.contains_key(&k) || self.waiting.iter().any(|j| key(&j.id) == k) {
+            return;
+        }
         let path = m["path"].as_str().unwrap_or("").to_string();
         let refuse = |why: String| {
             let _ = self.tx.send(failed(&id, &path, &why));
@@ -231,12 +281,8 @@ impl AssetFetcher {
             return refuse(e);
         }
         let Some(file) = cache_file(&self.root, &path) else { return refuse(format!("assets.fetch: \"{path}\" is not a path under cache/ (no ., .., backslashes or colons)")) };
-        let k = key(&id);
-        if self.running.contains_key(&k) || self.waiting.iter().any(|j| key(&j.id) == k) {
-            return;
-        }
         let sha256 = m["sha256"].as_str().map(str::to_ascii_lowercase);
-        self.waiting.push_back(Job { id, url: url.to_string(), path, file, sha256 });
+        self.waiting.push_back(Job { id, url: url.to_string(), path, file, sha256, policy: self.policy.clone() });
         self.start();
     }
 
@@ -405,6 +451,98 @@ mod tests {
         assert!(!root.join("cache/n/20").exists() && f.pending() == (0, 0));
         // ("body of /nI": 11 bytes for the ten of one digit, 12 for the thirteen others that came.)
         assert_eq!(f.counts(), AssetCounts { requests: 31, downloaded: 24, cached: 2, failed: 3, bytes: 14 + 10 * 11 + 13 * 12 });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Where a redirect goes, from the address that answered it.
+    #[test]
+    fn redirects_resolve_from_the_answering_address() {
+        let from = "https://x.org/a/b.bin?q=1";
+        for (location, want) in [
+            ("https://y.org/c", "https://y.org/c"),
+            ("HTTP://y.org/c", "HTTP://y.org/c"),
+            ("//y.org/c", "https://y.org/c"),
+            ("/c/d", "https://x.org/c/d"),
+            ("c.bin", "https://x.org/a/c.bin"),
+            ("c.bin?v=2", "https://x.org/a/c.bin?v=2"),
+            ("file:///etc/hosts", "file:///etc/hosts"),
+        ] {
+            assert_eq!(redirect_to(from, location).as_deref(), Some(want), "{location}");
+        }
+        assert_eq!(redirect_to("https://x.org", "c").as_deref(), Some("https://x.org/c"));
+        assert_eq!(redirect_to(from, " "), None);
+    }
+
+    /// Redirects followed with the policy checked at each: one beside the path and one from the root brought, one to
+    /// an address the policy refuses refused (nothing written), one that loops given up; the default agent follows
+    /// none on its own. A second request under a running id is ignored even when it would be refused, and the first
+    /// is still answered.
+    #[test]
+    fn redirects_are_held_to_the_policy() {
+        use std::io::{BufRead, BufReader, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let path = line.split(' ').nth(1).unwrap_or("/").to_string();
+                    loop {
+                        let mut h = String::new();
+                        if reader.read_line(&mut h).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let location = match path.as_str() {
+                        "/r/near" => Some("b.bin".to_string()),
+                        "/root" => Some("/r/b.bin".to_string()),
+                        "/away" => Some(format!("http://127.0.0.1:{port}/forbidden/b.bin")),
+                        "/loop" => Some("/loop".to_string()),
+                        _ => None,
+                    };
+                    let mut stream = stream;
+                    let _ = match location {
+                        Some(l) => write!(stream, "HTTP/1.1 302 Found\r\nLocation: {l}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                        None => write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\nbody of {path}", 8 + path.len()),
+                    };
+                });
+            }
+        });
+        let root = std::env::temp_dir().join(format!("threert-assets-redirects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).proxy(None).build().into();
+        let open = http_or_https();
+        let policy: Policy = Arc::new(move |url: &str| if url.contains("/forbidden/") { Err(format!("{url}: not here")) } else { open(url) });
+        let mut f = AssetFetcher::new(root.clone()).with_policy(policy).with_agent(agent);
+        let url = |p: &str| format!("http://127.0.0.1:{port}{p}");
+        let wait = |f: &mut AssetFetcher, n: usize| {
+            let mut got = vec![];
+            for _ in 0..500 {
+                got.extend(f.poll());
+                if got.len() >= n {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            got.sort_by_key(|m| m["id"].as_str().unwrap_or("").to_string());
+            got
+        };
+        for (id, p) in [("a", "/r/near"), ("b", "/root"), ("c", "/away"), ("d", "/loop")] {
+            f.post(&json!({ "t": "assets.fetch", "id": id, "url": url(p), "path": format!("cache/{id}") }));
+        }
+        // (The same id again, and refused at once if it were taken: ignored.)
+        f.post(&json!({ "t": "assets.fetch", "id": "a", "url": "file:///etc/hosts", "path": "cache/a" }));
+        let got = wait(&mut f, 4);
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[0], json!({ "t": "assets.fetched", "id": "a", "path": "cache/a", "status": 200, "size": 16, "cached": false }));
+        assert_eq!(got[1], json!({ "t": "assets.fetched", "id": "b", "path": "cache/b", "status": 200, "size": 16, "cached": false }));
+        assert_eq!(std::fs::read_to_string(root.join("cache/a")).unwrap(), "body of /r/b.bin");
+        assert!(got[2]["status"] == json!(0) && got[2]["error"].as_str().is_some_and(|e| e.contains("not here")) && !root.join("cache/c").exists(), "{got:?}");
+        assert!(got[3]["status"] == json!(0) && got[3]["error"].as_str().is_some_and(|e| e.contains("redirects")) && !root.join("cache/d").exists(), "{got:?}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(f.poll().is_empty() && f.pending() == (0, 0));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

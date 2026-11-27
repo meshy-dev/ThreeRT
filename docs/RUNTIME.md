@@ -640,9 +640,13 @@ The files stay there across runs: that directory is the game's offline cache.
   `url` is `http://` or `https://` (an app may allow less: a client allows what its network policy does).
 - `status`: the HTTP status. 200: the body is at `path` (written to `<path>.part`, then renamed), `size` bytes.
   Another status (204, 404, ...): nothing written, `size` 0. 0: the request failed, `error` says why (the address,
-  the path, the network, a body over 64 MiB, a body whose sha256 is not `sha256`).
+  the path, the network, a body over 64 MiB, a body whose sha256 is not `sha256`, a redirect to an address the app
+  does not allow, more than 5 redirects).
 - `cached: true`: the file was there already, from the same `url`, or with the same `sha256` (hex, either case);
   nothing was downloaded. The app keeps what it knows of a file beside it (`AssetFetcher`: `.<name>.fetched`, JSON).
+- Redirects are followed one at a time, each address held to the same check as `url` (an `https://` address that
+  redirects to `http://` is refused where only `https://` is allowed). A second request under an `id` that is under
+  way or waiting is ignored; the first is answered.
 - At most 16 downloads are under way; more wait in the order they came. A canceled request that waits is taken out;
   one under way stops and its partial file is removed. Neither is answered.
 - An app that answers them lists `"assets"` in `launch.caps`.
@@ -650,12 +654,14 @@ The files stay there across runs: that directory is the game's offline cache.
   `AssetFetcher::new(asset_root)` is a `HostServices` (`post`, `poll`, `caps` = `["assets"]`) for any app that holds a
   `GameSession`: route the game's `assets.*` posts to it, add what `poll` returns to the frame's batch, list its caps
   in `launch`. `https://` only by default; an app with a network policy gives its check of an address
-  (`with_policy`) and its own HTTP agent (`with_agent`: its resolver, its proxy, its redirects). `counts()` and
+  (`with_policy`, which every redirect is held to as well) and its own HTTP agent (`with_agent`: its resolver, its
+  proxy; with `max_redirects(0)`, so that the fetcher follows the redirects and checks each). `counts()` and
   `pending()` for a status page.
 - `play` uses it with `http://` allowed too, into `<--assets>/cache/`. `live`: the driver is the app; it writes under
   the same `--assets` and answers. Checked: `assets.rs` tests (a server on the machine: the download, `cached` by
   address and by hash, a wrong hash, a 404, the default policy's refusal of http, 24 requests at once, a cancel,
-  paths out of the cache).
+  paths out of the cache; redirects beside the path and from the root followed, one to a refused address and a loop
+  refused, a repeated id ignored).
 
 ### Files
 
