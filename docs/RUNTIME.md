@@ -1828,6 +1828,16 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
+Three more, measured on whole scenes against the offline render in linear radiance (2026-11-27), held by no test:
+
+- A path's end reflects the cache's irradiance as light from the whole hemisphere. Where a low sun on a polished
+  floor throws its beam at a wall, a daylight interior's bounced light reads 0.80 to 0.89 (the picture 3 % dark).
+  Ending the path a bounce later brings the picture to 0.98, for 13 to 24 % of a frame.
+- A live path has 4 bounces at most, whatever a scene's preset asks. A jeweller's window that asks for 8 reads
+  3.8 % dark: 2.2 for the bounces, 1.0 for the live indirect clamp, 0.7 for the cache.
+- The upscaler's history of a sky seen directly lags a sky that changes fast: in a time-lapse that dims it 1 % a
+  frame the picture reads 4 % bright, and comes down in 64 to 128 frames once the clock is held.
+
 ## Live rendering settings
 
 The native `play` and `live` commands, `serve` live jobs and the browser take four settings, one for each gap
