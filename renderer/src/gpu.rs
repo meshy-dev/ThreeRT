@@ -3214,9 +3214,9 @@ impl Gpu {
     /// The emitters' weights again (emitter_weights.wgsl): each entry's weight from its record, material and object as
     /// the encoder's earlier commands and the writes queued before its submission leave them, the cumulative table,
     /// its guide, the tree's powers and the table's header. `n` emitters; `lod`, `cull`: the light LOD (`lod[3]` 0:
-    /// none).
+    /// none); `ts`: where the pass writes its two timestamps.
     #[allow(clippy::too_many_arguments)]
-    pub fn weigh_emitters(&self, up: &Uploaded, st: &mut Option<EmitterWeights>, n: u32, tree: Option<&crate::ltree::LightTree>, stride: u32, lod: [f32; 4], cull: crate::EmitterCull, e: &mut wgpu::CommandEncoder) {
+    pub fn weigh_emitters(&self, up: &Uploaded, st: &mut Option<EmitterWeights>, n: u32, tree: Option<&crate::ltree::LightTree>, stride: u32, lod: [f32; 4], cull: crate::EmitterCull, e: &mut wgpu::CommandEncoder, ts: Option<(&wgpu::QuerySet, u32)>) {
         if n == 0 {
             return;
         }
@@ -3266,7 +3266,8 @@ impl Gpu {
         let (layout, pipes) = self.weigh_pipelines();
         let entries = [buffer_entry(0, &s.params), buffer_entry(1, &heap.buffer), buffer_entry(2, &words.buffer), buffer_entry(3, &s.levels), buffer_entry(4, &s.blocks)];
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("emitter weights"), layout, entries: &entries });
-        let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("emitter weights"), timestamp_writes: None });
+        let tw = ts.map(|(q, i)| wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(i), end_of_pass_write_index: Some(i + 1) });
+        let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("emitter weights"), timestamp_writes: tw });
         pass.set_bind_group(0, &bg, &[]);
         let [weigh, scan_a, scan_b, scan_c, guide, tree_pass, next, finish] = pipes;
         for (pipe, groups) in [(weigh, n.div_ceil(64)), (scan_a, n.div_ceil(256).div_ceil(64)), (scan_b, 1), (scan_c, n.div_ceil(64)), (guide, (crate::EMITTER_GUIDE as u32 / 4 + 1).div_ceil(64))] {
