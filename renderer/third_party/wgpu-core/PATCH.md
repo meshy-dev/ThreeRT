@@ -34,8 +34,12 @@ far up a slot was touched, nothing uses it, and its comment says as much.
   it). A build:
   - serialises the changed slots alone and copies each run of them to its place in the TLAS's instance buffer (the
     slots keep their positions: upstream packs the present instances together, so one removed moved all after it);
-  - writes an empty slot as a copy of the TLAS's first BLAS (`TlasSlots::null`, held for the TLAS's life) with mask 0
-    and a zero transform: no extent, never hit;
+  - writes an empty slot as a copy of the TLAS's first BLAS (`TlasSlots::null`, held for the TLAS's life) with mask 0,
+    scaled to a point (1e-6 of its size) where the instance that gave it stood (`TlasSlots::null_at`): never hit, and
+    an instance as any other to the build. (It was a zero transform until 2026-11-27. Among such instances Metal's
+    structure lost a scene's only wall to every ray, and a ray from the world origin its hits: a scene with room
+    for edits has a thousand empty slots.) The slots left empty before the first BLAS came are written so when it
+    comes (the builds until then take no instance);
   - builds over all `total` slots, from the instance buffer as it now is;
   - gives the TLAS its BLASes once each as its dependencies (validation and residency per use: the distinct BLASes,
     not the instances).

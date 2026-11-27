@@ -2921,6 +2921,16 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**An empty slot of the top-level structure is an instance at a point (2026-11-27, after it).** The patched build
+of the top-level structure wrote an empty slot as an instance of a zero transform (`renderer/third_party/wgpu-core/
+PATCH.md`), and a scene with room for edits has a thousand of them. On Metal such a structure lost hits: a scene of
+one wall was black from everywhere, and a camera at the world's origin saw nothing in others (the cause of eleven
+render tests that failed between 2026-11-23 and 2026-11-25, while every scene had eight such slots). An empty slot
+is now the same instance scaled to a point (1e-6 of its size, as an instance placed without size is) where the
+structure's first instance stood, with mask 0; slots left empty before the first instance came are written again
+when it comes. Test: `the_camera_at_the_worlds_origin_sees_what_it_sees_elsewhere` (black under hardware
+traversal before). Not checked on Vulkan.
+
 **The emitters' weights are made on the GPU (2026-11-27).** An emitter's weight (its area × its material's emissive
 luminance × its object's power), the cumulative table, its guide and the light tree's powers were made on the CPU,
 over every emitter, at each power or material edit: 59 to 74 ms in the frame of a material edit in Tokyo's
