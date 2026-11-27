@@ -218,11 +218,22 @@ export class Vector3 {
       Math.hypot(e[8], e[9], e[10]),
     );
   }
-  toArray(): [number, number, number] {
-    return [this.x, this.y, this.z];
+  /** A new `[x, y, z]`, or written into `array` at `offset` (three.js). */
+  toArray(): [number, number, number];
+  toArray<T extends { [i: number]: number }>(array: T, offset?: number): T;
+  toArray(array?: { [i: number]: number }, offset = 0): { [i: number]: number } {
+    if (array === undefined) return [this.x, this.y, this.z];
+    array[offset] = this.x;
+    array[offset + 1] = this.y;
+    array[offset + 2] = this.z;
+    return array;
   }
   fromArray(a: ArrayLike<number>, o = 0): this {
     return this.set(a[o], a[o + 1], a[o + 2]);
+  }
+  /** Vertex `index` of a BufferAttribute (three.js). */
+  fromBufferAttribute(attribute: { getX(i: number): number; getY(i: number): number; getZ(i: number): number }, index: number): this {
+    return this.set(attribute.getX(index), attribute.getY(index), attribute.getZ(index));
   }
 }
 
@@ -984,9 +995,38 @@ export class Color {
     this.b = srgbToLinear((hex & 255) / 255);
     return this;
   }
+  /** A CSS color, sRGB-encoded: `#rrggbb`, `#rgb`, `rgb()` / `rgba()` in 0..255 or percent, `hsl()` / `hsla()`, or a
+   *  keyword, as three.js parses them (alpha is ignored). What three.js would warn about and skip, this throws on. */
   setStyle(style: string): this {
     const m = /^#?([0-9a-f]{6})$/i.exec(style.trim());
     if (m) return this.setHex(parseInt(m[1], 16));
+    const short = /^#([0-9a-f]{3})$/i.exec(style.trim());
+    if (short) {
+      const [r, g, b] = [...short[1]].map((c) => srgbToLinear(parseInt(c, 16) / 15));
+      return this.setRGB(r, g, b);
+    }
+    const fn = /^(\w+)\(([^)]*)\)/.exec(style);
+    if (fn) {
+      const [, name, args] = fn;
+      const srgb = (r: number, g: number, b: number) => this.setRGB(srgbToLinear(r), srgbToLinear(g), srgbToLinear(b));
+      let c: RegExpExecArray | null;
+      if (name === "rgb" || name === "rgba") {
+        // rgb(255,0,0) rgba(255,0,0,0.5)
+        if ((c = /^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+(?:\.\d+)?|\.\d+)\s*)?$/.exec(args))) {
+          return srgb(Math.min(255, parseInt(c[1], 10)) / 255, Math.min(255, parseInt(c[2], 10)) / 255, Math.min(255, parseInt(c[3], 10)) / 255);
+        }
+        // rgb(100%,0%,0%) rgba(100%,0%,0%,0.5) rgb(50.5%,0%,0%)
+        if ((c = /^\s*(\d+(?:\.\d+)?|\.\d+)%\s*,\s*(\d+(?:\.\d+)?|\.\d+)%\s*,\s*(\d+(?:\.\d+)?|\.\d+)%\s*(?:,\s*(\d+(?:\.\d+)?|\.\d+)\s*)?$/.exec(args))) {
+          return srgb(Math.min(100, parseFloat(c[1])) / 100, Math.min(100, parseFloat(c[2])) / 100, Math.min(100, parseFloat(c[3])) / 100);
+        }
+      } else if (name === "hsl" || name === "hsla") {
+        // hsl(120,50%,50%) hsla(120,50%,50%,0.5) hsl(-120,50%,50%)
+        if ((c = /^\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(\d+(?:\.\d+)?|\.\d+)%\s*,\s*(\d+(?:\.\d+)?|\.\d+)%\s*(?:,\s*(\d+(?:\.\d+)?|\.\d+)\s*)?$/.exec(args))) {
+          return this.setHSL(parseFloat(c[1]) / 360, parseFloat(c[2]) / 100, parseFloat(c[3]) / 100);
+        }
+      }
+      throw new Error(`unsupported color: ${style}`);
+    }
     const named = NAMED_COLORS[style.toLowerCase()];
     if (named !== undefined) return this.setHex(named);
     throw new Error(`unsupported color: ${style}`);
@@ -1321,12 +1361,39 @@ export class Vector2 {
   equals(v: Vector2): boolean {
     return v.x === this.x && v.y === this.y;
   }
-  toArray(): [number, number] {
-    return [this.x, this.y];
+  /** A new `[x, y]`, or written into `array` at `offset` (three.js). */
+  toArray(): [number, number];
+  toArray<T extends { [i: number]: number }>(array: T, offset?: number): T;
+  toArray(array?: { [i: number]: number }, offset = 0): { [i: number]: number } {
+    if (array === undefined) return [this.x, this.y];
+    array[offset] = this.x;
+    array[offset + 1] = this.y;
+    return array;
   }
   fromArray(a: ArrayLike<number>, o = 0): this {
     return this.set(a[o], a[o + 1]);
   }
+  /** Vertex `index` of a BufferAttribute (three.js). */
+  fromBufferAttribute(attribute: { getX(i: number): number; getY(i: number): number }, index: number): this {
+    return this.set(attribute.getX(index), attribute.getY(index));
+  }
+}
+
+/** What Box3.setFromObject reads of an Object3D (structural, so math.ts need not import the scene graph). */
+export interface BoundedObject {
+  readonly children: readonly BoundedObject[];
+  readonly matrixWorld: Matrix4;
+  updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void;
+  readonly geometry?: {
+    getAttribute?(name: string): { count: number; getX(i: number): number; getY(i: number): number; getZ(i: number): number } | undefined;
+    boundingBox?: Box3 | null;
+    computeBoundingBox?(): void;
+    boxes?: ArrayLike<number>;
+  };
+  readonly isInstancedMesh?: boolean;
+  readonly isBatchedMesh?: boolean;
+  boundingBox?: Box3 | null;
+  computeBoundingBox?(): void;
 }
 
 /** An axis-aligned box (three.js Box3). */
@@ -1369,6 +1436,46 @@ export class Box3 {
   }
   union(b: Box3): this {
     return this.expandByPoint(b.min).expandByPoint(b.max);
+  }
+  /** The world-axis-aligned box of `object` and its descendants (three.js). */
+  setFromObject(object: BoundedObject, precise = false): this {
+    return this.makeEmpty().expandByObject(object, precise);
+  }
+  /**
+   * Grows this box by the world box of `object` and its descendants, their world matrices updated on the way down
+   * (the object's ancestors are assumed current, as three.js). By default each geometry's bounding box transformed, a
+   * box that may be loose; `precise` transforms every vertex instead (not for instanced meshes). Procedural geometry
+   * is bounded by its boxes.
+   */
+  expandByObject(object: BoundedObject, precise = false): this {
+    object.updateWorldMatrix(false, false);
+    const geometry = object.geometry;
+    if (geometry) {
+      const position = geometry.getAttribute?.("position");
+      if (precise && position && object.isInstancedMesh !== true && object.isBatchedMesh !== true) {
+        const v = new Vector3();
+        for (let i = 0; i < position.count; i++) this.expandByPoint(v.fromBufferAttribute(position, i).applyMatrix4(object.matrixWorld));
+      } else {
+        let box: Box3 | null = null;
+        if (object.boundingBox !== undefined) {
+          // An object-level box (instanced meshes), where the object computes one.
+          if (object.boundingBox === null) object.computeBoundingBox?.();
+          box = object.boundingBox;
+        }
+        if (!box && geometry.computeBoundingBox) {
+          if (!geometry.boundingBox) geometry.computeBoundingBox();
+          box = geometry.boundingBox ?? null;
+        }
+        if (!box && geometry.boxes) {
+          box = new Box3();
+          const b = geometry.boxes, lo = new Vector3(), hi = new Vector3();
+          for (let i = 0; i + 5 < b.length; i += 6) box.expandByPoint(lo.set(b[i], b[i + 1], b[i + 2])).expandByPoint(hi.set(b[i + 3], b[i + 4], b[i + 5]));
+        }
+        if (box) this.union(box.clone().applyMatrix4(object.matrixWorld));
+      }
+    }
+    for (const child of object.children) this.expandByObject(child, precise);
+    return this;
   }
   /** Narrows this box to its overlap with `b` (three.js). */
   intersect(b: Box3): this {
@@ -1522,6 +1629,59 @@ export class Sphere {
     return this;
   }
 
+  /** The sphere around `points`, centred on `optionalCenter` or else on their box's centre (three.js; not the smallest). */
+  setFromPoints(points: Vector3[], optionalCenter?: Vector3): this {
+    if (optionalCenter !== undefined) this.center.copy(optionalCenter);
+    else new Box3().setFromPoints(points).getCenter(this.center);
+    let r2 = 0;
+    for (const p of points) r2 = Math.max(r2, this.center.distanceToSquared(p));
+    this.radius = Math.sqrt(r2);
+    return this;
+  }
+  intersectsBox(box: Box3): boolean {
+    return box.intersectsSphere(this);
+  }
+  intersectsPlane(plane: Plane): boolean {
+    return Math.abs(plane.distanceToPoint(this.center)) <= this.radius;
+  }
+  /** `point`, or the nearest point of the sphere's surface if it lies outside (three.js). */
+  clampPoint(point: Vector3, target = new Vector3()): Vector3 {
+    target.copy(point);
+    if (this.center.distanceToSquared(point) > this.radius * this.radius) {
+      target.sub(this.center).normalize().multiplyScalar(this.radius).add(this.center);
+    }
+    return target;
+  }
+  /** The box around the sphere; an empty sphere gives an empty box (three.js). */
+  getBoundingBox(target = new Box3()): Box3 {
+    if (this.isEmpty()) return target.makeEmpty();
+    const { x, y, z } = this.center, r = this.radius;
+    target.min.set(x - r, y - r, z - r);
+    target.max.set(x + r, y + r, z + r);
+    return target;
+  }
+  /** Grows this sphere to hold `sphere` too (three.js). */
+  union(sphere: Sphere): this {
+    if (sphere.isEmpty()) return this;
+    if (this.isEmpty()) return this.copy(sphere);
+    if (this.center.equals(sphere.center)) {
+      this.radius = Math.max(this.radius, sphere.radius);
+    } else {
+      const v = new Vector3().subVectors(sphere.center, this.center).setLength(sphere.radius);
+      this.expandByPoint(sphere.center.clone().add(v));
+      this.expandByPoint(sphere.center.clone().sub(v));
+    }
+    return this;
+  }
+  toJSON(): { radius: number; center: [number, number, number] } {
+    return { radius: this.radius, center: this.center.toArray() };
+  }
+  fromJSON(json: { radius: number; center: ArrayLike<number> }): this {
+    this.radius = json.radius;
+    this.center.fromArray(json.center);
+    return this;
+  }
+
   clone(): Sphere {
     return new Sphere(this.center.clone(), this.radius);
   }
@@ -1542,6 +1702,115 @@ export class Ray {
   }
   at(t: number, target = new Vector3()): Vector3 {
     return target.set(this.origin.x + this.direction.x * t, this.origin.y + this.direction.y * t, this.origin.z + this.direction.z * t);
+  }
+  copy(ray: Ray): this {
+    return this.set(ray.origin, ray.direction);
+  }
+  clone(): Ray {
+    return new Ray().copy(this);
+  }
+  equals(ray: Ray): boolean {
+    return ray.origin.equals(this.origin) && ray.direction.equals(this.direction);
+  }
+  /** Points the ray from its origin toward `v` (three.js). */
+  lookAt(v: Vector3): this {
+    this.direction.copy(v).sub(this.origin).normalize();
+    return this;
+  }
+  /** Moves the origin `t` along the ray (three.js). */
+  recast(t: number): this {
+    this.origin.copy(this.at(t, new Vector3()));
+    return this;
+  }
+  /** The point of the ray nearest `point`: the origin when `point` lies behind it (three.js). */
+  closestPointToPoint(point: Vector3, target = new Vector3()): Vector3 {
+    const t = target.subVectors(point, this.origin).dot(this.direction);
+    return t < 0 ? target.copy(this.origin) : target.copy(this.origin).addScaledVector(this.direction, t);
+  }
+  distanceToPoint(point: Vector3): number {
+    return Math.sqrt(this.distanceSqToPoint(point));
+  }
+  distanceSqToPoint(point: Vector3): number {
+    return this.closestPointToPoint(point).distanceToSquared(point);
+  }
+  /** The squared distance from the ray to the segment `v0`–`v1`, and optionally the nearest points on each
+   *  (three.js, after Eberly's DistRaySegment). */
+  distanceSqToSegment(v0: Vector3, v1: Vector3, optionalPointOnRay?: Vector3, optionalPointOnSegment?: Vector3): number {
+    const segCenter = new Vector3().addVectors(v0, v1).multiplyScalar(0.5);
+    const segDir = new Vector3().subVectors(v1, v0).normalize();
+    const diff = new Vector3().subVectors(this.origin, segCenter);
+    const segExtent = v0.distanceTo(v1) * 0.5;
+    const a01 = -this.direction.dot(segDir);
+    const b0 = diff.dot(this.direction);
+    const b1 = -diff.dot(segDir);
+    const c = diff.lengthSq();
+    const det = Math.abs(1 - a01 * a01);
+    let s0: number, s1: number, sqrDist: number;
+    if (det > 0) {
+      // The ray and segment are not parallel.
+      s0 = a01 * b1 - b0;
+      s1 = a01 * b0 - b1;
+      const extDet = segExtent * det;
+      if (s0 >= 0) {
+        if (s1 >= -extDet) {
+          if (s1 <= extDet) {
+            // The minimum is at interior points of both.
+            const invDet = 1 / det;
+            s0 *= invDet;
+            s1 *= invDet;
+            sqrDist = s0 * (s0 + a01 * s1 + 2 * b0) + s1 * (a01 * s0 + s1 + 2 * b1) + c;
+          } else {
+            s1 = segExtent;
+            s0 = Math.max(0, -(a01 * s1 + b0));
+            sqrDist = -s0 * s0 + s1 * (s1 + 2 * b1) + c;
+          }
+        } else {
+          s1 = -segExtent;
+          s0 = Math.max(0, -(a01 * s1 + b0));
+          sqrDist = -s0 * s0 + s1 * (s1 + 2 * b1) + c;
+        }
+      } else if (s1 <= -extDet) {
+        s0 = Math.max(0, -(-a01 * segExtent + b0));
+        s1 = s0 > 0 ? -segExtent : Math.min(Math.max(-segExtent, -b1), segExtent);
+        sqrDist = -s0 * s0 + s1 * (s1 + 2 * b1) + c;
+      } else if (s1 <= extDet) {
+        s0 = 0;
+        s1 = Math.min(Math.max(-segExtent, -b1), segExtent);
+        sqrDist = s1 * (s1 + 2 * b1) + c;
+      } else {
+        s0 = Math.max(0, -(a01 * segExtent + b0));
+        s1 = s0 > 0 ? segExtent : Math.min(Math.max(-segExtent, -b1), segExtent);
+        sqrDist = -s0 * s0 + s1 * (s1 + 2 * b1) + c;
+      }
+    } else {
+      // Parallel: the nearest end of the segment.
+      s1 = a01 > 0 ? -segExtent : segExtent;
+      s0 = Math.max(0, -(a01 * s1 + b0));
+      sqrDist = -s0 * s0 + s1 * (s1 + 2 * b1) + c;
+    }
+    optionalPointOnRay?.copy(this.origin).addScaledVector(this.direction, s0);
+    optionalPointOnSegment?.copy(segCenter).addScaledVector(segDir, s1);
+    return sqrDist;
+  }
+  /** Where the ray first meets `sphere` (its exit if the origin is inside), or null; an empty sphere is never met (three.js). */
+  intersectSphere(sphere: Sphere, target = new Vector3()): Vector3 | null {
+    if (sphere.radius < 0) return null;
+    const v = new Vector3().subVectors(sphere.center, this.origin);
+    const tca = v.dot(this.direction);
+    const d2 = v.dot(v) - tca * tca;
+    const radius2 = sphere.radius * sphere.radius;
+    if (d2 > radius2) return null;
+    const thc = Math.sqrt(radius2 - d2);
+    const t0 = tca - thc, t1 = tca + thc;
+    if (t1 < 0) return null;
+    return this.at(t0 < 0 ? t1 : t0, target);
+  }
+  intersectsSphere(sphere: Sphere): boolean {
+    if (sphere.radius < 0) return false;
+    return this.distanceSqToPoint(sphere.center) <= sphere.radius * sphere.radius;
+  }
+  intersectsBox(box: Box3): boolean {
+    return this.intersectBox(box) !== null;
   }
   applyMatrix4(m: Matrix4): this {
     this.origin.applyMatrix4(m);
