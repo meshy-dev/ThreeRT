@@ -1,7 +1,7 @@
 // Three-like scene graph. Only the subset that maps cleanly onto a physically based renderer is exposed; everything
 // uses physical units (see engine.ts, which binds a scene to the engine).
 
-import { Color, type ColorLike, Euler, Matrix4, Quaternion, Vector2, Vector3 } from "./math.ts";
+import { Box3, Color, type ColorLike, Euler, Matrix4, Quaternion, Sphere, Vector2, Vector3 } from "./math.ts";
 import { type BufferGeometry, StaticDrawUsage } from "./geometry.ts";
 import type { ExposureDesc, Vec3 } from "./engine.ts";
 
@@ -1928,9 +1928,10 @@ export class InstancedMesh extends Object3D {
   declare private _count: number;
   declare private _color: InstancedBufferAttribute | null;
   declare private _instData: InstancedBufferAttribute | null;
-  /** three.js API; the renderer bounds the instances itself. */
-  boundingBox = null;
-  boundingSphere = null;
+  /** The first `count` instances' bounds in the mesh's space, by `computeBoundingBox` / `computeBoundingSphere`
+   *  (three.js); the renderer bounds the instances itself. */
+  boundingBox: Box3 | null = null;
+  boundingSphere: Sphere | null = null;
   constructor(geometry: BufferGeometry | ProceduralGeometry, material: MeshStandardMaterial | MeshStandardMaterial[] = new MeshStandardMaterial(), count = 1) {
     super();
     if (!Number.isInteger(count) || count < 0) throw new Error("InstancedMesh: count must be an integer >= 0");
@@ -2015,8 +2016,59 @@ export class InstancedMesh extends Object3D {
     for (let k = 0; k < 4; k++) target[k] = this._instData ? this._instData.array[index * 4 + k] : this.customData[k];
     return target;
   }
-  computeBoundingBox(): void {}
-  computeBoundingSphere(): void {}
+  /** The union of the geometry's box under each of the first `count` instance matrices, as three.js computes it. */
+  computeBoundingBox(): void {
+    const box = this.geometryBox();
+    const b = (this.boundingBox ??= new Box3()).makeEmpty();
+    const m = new Matrix4();
+    for (let i = 0; i < this._count; i++) b.union(box.clone().applyMatrix4(this.getMatrixAt(i, m)));
+  }
+  /** The union of the geometry's sphere under each of the first `count` instance matrices, as three.js computes it. */
+  computeBoundingSphere(): void {
+    const g = this._geometry;
+    let gs: Sphere;
+    if (g instanceof ProceduralGeometry) {
+      const box = this.geometryBox();
+      gs = new Sphere(box.getCenter(), box.isEmpty() ? -1 : box.min.distanceTo(box.max) / 2);
+    } else {
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      gs = g.boundingSphere!;
+    }
+    const s = (this.boundingSphere ??= new Sphere());
+    s.center.set(0, 0, 0);
+    s.radius = -1;
+    const m = new Matrix4(), c = new Vector3(), d = new Vector3();
+    for (let i = 0; i < this._count; i++) {
+      if (gs.radius < 0) break;
+      this.getMatrixAt(i, m);
+      const e = m.elements;
+      const scale = Math.sqrt(Math.max(e[0] * e[0] + e[1] * e[1] + e[2] * e[2], e[4] * e[4] + e[5] * e[5] + e[6] * e[6], e[8] * e[8] + e[9] * e[9] + e[10] * e[10]));
+      c.copy(gs.center).applyMatrix4(m);
+      const r = gs.radius * scale;
+      // three.js Sphere.union: the larger radius about a shared centre, else grown to both far points of the new sphere.
+      if (s.radius < 0) {
+        s.center.copy(c);
+        s.radius = r;
+      } else if (c.x === s.center.x && c.y === s.center.y && c.z === s.center.z) {
+        s.radius = Math.max(s.radius, r);
+      } else {
+        d.subVectors(c, s.center).normalize().multiplyScalar(r);
+        s.expandByPoint(c.clone().add(d)).expandByPoint(c.clone().sub(d));
+      }
+    }
+  }
+  private geometryBox(): Box3 {
+    const g = this._geometry;
+    if (!(g instanceof ProceduralGeometry)) {
+      if (!g.boundingBox) g.computeBoundingBox();
+      return g.boundingBox!;
+    }
+    const b = new Box3();
+    for (let i = 0; i + 5 < g.boxes.length; i += 6) {
+      b.expandByPoint(new Vector3(g.boxes[i], g.boxes[i + 1], g.boxes[i + 2])).expandByPoint(new Vector3(g.boxes[i + 3], g.boxes[i + 4], g.boxes[i + 5]));
+    }
+    return b;
+  }
   dispose(): this {
     return this;
   }
@@ -2028,6 +2080,8 @@ export class InstancedMesh extends Object3D {
       (this as { instanceMatrix: InstancedBufferAttribute }).instanceMatrix = dup(source.instanceMatrix);
       this._color = source._color && dup(source._color);
       this._instData = source._instData && dup(source._instData);
+      this.boundingBox = source.boundingBox?.clone() ?? null;
+      this.boundingSphere = source.boundingSphere?.clone() ?? null;
     }
     return this;
   }
