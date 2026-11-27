@@ -8,57 +8,50 @@ use super::*;
 pub(super) struct FrameTimer {
     pub(super) queries: wgpu::QuerySet,
     pub(super) resolve: wgpu::Buffer,
-    /// Per slot: readback buffer and its state (0 free, 1 mapping, 2 mapped).
+    /// Per slot: readback buffer and its state (0 free, 1 mapping, 2 mapped, 3 its frame's stamps written and not
+    /// yet resolved).
     pub(super) reads: Vec<(wgpu::Buffer, Arc<AtomicU32>)>,
     /// Per slot: the frame it timed, and that frame's samples per pixel (its traces; only the first is timestamped).
     pub(super) frames: [u32; TIMER_SLOTS],
     pub(super) spps: [u32; TIMER_SLOTS],
+    /// Per slot: the pairs its frame wrote (bit a pair).
+    pub(super) ran: [u8; TIMER_SLOTS],
     pub(super) slot: usize,
 }
 
-pub(super) const TIMER_SLOTS: usize = 4;
+/// (A frame holds its slot for about three frames: written, resolved in the next one, read after that.)
+pub(super) const TIMER_SLOTS: usize = 6;
 /// Stamps a slot, a pair a pass: the trace, the post pass, the emitter weights', the particles', and the post pass
 /// after a reconstruction provider.
 pub(super) const TIMER_QUERIES: u32 = 10;
 
-/// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
+/// Gap (ms) between a frame's trace and its post pass past which the wait is not counted (`frame_gpu_ms`).
 pub(super) const TIMER_GAP_MS: f32 = 2.0;
-/// The same for the passes after a reconstruction provider, past the passes before it. The provider's work is between
-/// them (the joint denoiser's about 1 ms at 960 x 540); another frame's stamps are frames away.
-pub(super) const TIMER_PROVIDER_MS: f32 = 8.0;
 
-/// A frame's GPU time (ms) from its slot's timestamps (trace, post, the emitter weights', particle pass pairs, the post
-/// pass after a provider; zero: not run): from its first pass (particles, the emitters' weights or trace) to the end of
-/// its last. The post pass follows the trace's command
-/// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
-/// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
-/// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
-/// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
-/// its passes, the further traces at the first one's length.
+/// A frame's GPU time (ms) from its slot's timestamps (a pair a pass: trace, post, the emitter weights', the
+/// particles', the post pass after a reconstruction provider; zero: not run): from its first pass (particles, the
+/// emitters' weights or trace) to the end of its last. With a provider the post pass is two, the passes before it and
+/// those after it, the provider's work between them. The post pass follows the trace's command buffer within
+/// ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as the first). A
+/// post pass that begins more than TIMER_GAP_MS past where those traces would end (twice their length) did not
+/// follow them: the frame is counted as its passes, the further traces at the first one's length.
 ///
-/// With a reconstruction provider the post pass is two, the provider between them: the passes before it (the second
-/// pair) and those after it (the fifth). One pair split over the two did not time them: on Metal the stamp of a pass
-/// that writes its begin alone read 10 ms late, and the frame counted as its trace. The fifth pair too is now and
-/// then a later frame's (1 or 2 of the crowd's 1200 frames read 38 ms for 4.2): past TIMER_PROVIDER_MS it counts by
-/// its own length, the provider's work not known then.
+/// The stamps are resolved a frame after their passes (`FrameTimer::resolve_written`). Resolved in the command
+/// buffer that wrote them, Metal returned the slot's previous use, four frames old, and now and then a mix of the two
+/// uses: 2–3 % of the crowd scene's frames read 70–80 ms. A pass that writes one stamp of a pair is not timed at all
+/// (its begin alone read 10 ms late).
 pub(super) fn frame_gpu_ms(t: &[u64; 10], spp: u32, period_ns: f32) -> Option<f32> {
     let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
-    if t[3] <= start {
+    let end = t[3].max(t[9]);
+    if end <= start {
         return None;
     }
     let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
     let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
-    let post = if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
-        ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2]))
-    } else {
-        ms(t[3] - start)
-    };
-    if t[9] == 0 {
-        return Some(post);
+    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
+        return Some(ms(t[1] - start) + more as f32 * trace + ms(end.saturating_sub(t[2])));
     }
-    let after = ms(t[9].saturating_sub(t[8]));
-    let provider = if t[8] >= t[3] && ms(t[8] - t[3]) <= TIMER_PROVIDER_MS { ms(t[8] - t[3]) } else { 0.0 };
-    Some(post + provider + after)
+    Some(ms(end - start))
 }
 
 impl FrameTimer {
@@ -72,6 +65,7 @@ impl FrameTimer {
             reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: TIMER_QUERIES as u64 * 8, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
             frames: [0; TIMER_SLOTS],
             spps: [1; TIMER_SLOTS],
+            ran: [0; TIMER_SLOTS],
             slot: 0,
         }
     }
@@ -98,9 +92,23 @@ impl FrameTimer {
         (latest, slot)
     }
 
-    /// Pair `pair` of `slot` into the slot's readback, in the command buffer that wrote it (Metal reads zeros
-    /// otherwise); `ran` false: zeros.
-    pub(super) fn resolve_pair(&self, e: &mut wgpu::CommandEncoder, slot: usize, pair: u32, ran: bool) {
+    /// The slots whose frames are over (state 3) resolved into their readbacks, a frame after their passes: the
+    /// slots to map once this encoder is submitted.
+    pub(super) fn resolve_written(&self, e: &mut wgpu::CommandEncoder) -> Vec<usize> {
+        let mut out = vec![];
+        for k in 0..TIMER_SLOTS {
+            if self.reads[k].1.load(Ordering::Acquire) == 3 {
+                for pair in 0..TIMER_QUERIES / 2 {
+                    self.resolve_pair(e, k, pair, self.ran[k] >> pair & 1 != 0);
+                }
+                out.push(k);
+            }
+        }
+        out
+    }
+
+    /// Pair `pair` of `slot` into the slot's readback; `ran` false: zeros.
+    fn resolve_pair(&self, e: &mut wgpu::CommandEncoder, slot: usize, pair: u32, ran: bool) {
         let at = (slot as u64 * (TIMER_QUERIES as u64 / 2) + pair as u64) * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
         if ran {
             let q = slot as u32 * TIMER_QUERIES + pair * 2;
@@ -477,13 +485,6 @@ impl LiveCore {
                 e.resolve_query_set(&p.grid.0, 4..6, &p.grid.1, wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
                 e.copy_buffer_to_buffer(&p.grid.1, wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, &p.grid.2, 32, 16);
             }
-            // Each pair is resolved in the command buffer that wrote it (Metal reads zeros otherwise).
-            if let (None, Some(t), Some(slot), 0) = (&self.profile, &self.timer, timed, k) {
-                // The trace's pair, the emitter weights' and the particles' (zeros when the pass did not run).
-                for (pair, ran) in [(0u32, true), (2, weighed), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
-                    t.resolve_pair(&mut e, slot, pair, ran);
-                }
-            }
             g.queue.submit([e.finish()]);
         }
         let b = &self.bloom;
@@ -563,6 +564,7 @@ impl LiveCore {
             pass.dispatch_workgroups((gpu::CACHE_SIZE / 256) as u32, 1, 1);
         }
         let mut before_post: Option<[wgpu::CommandBuffer; 2]> = None;
+        let mut mapping: Vec<usize> = vec![];
         let use_provider = reconstruction.external();
         let mut provider_failed = false;
         let mut reconstruct = |e: &mut wgpu::CommandEncoder| {
@@ -614,16 +616,13 @@ impl LiveCore {
             e.resolve_query_set(&p.queries, 0..n * 2, &p.resolve, 0);
             e.copy_buffer_to_buffer(&p.resolve, 0, &p.read, 0, p.read.size());
         } else {
-            // A pass is timed by a pair of stamps of its own: with a provider, the passes before it (the second pair,
-            // resolved before the provider may end this command buffer) and those after it (the fifth).
+            // A pass is timed by a pair of stamps of its own: with a provider, the passes before it (the second pair)
+            // and those after it (the fifth).
             let pair = |k: u32| self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES + k), end_of_pass_write_index: Some(slot as u32 * TIMER_QUERIES + k + 1) });
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: pair(2) });
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 if use_provider && *name == "upscale" {
                     drop(pass);
-                    if let (Some(t), Some(slot)) = (&self.timer, timed) {
-                        t.resolve_pair(&mut e, slot, 1, true);
-                    }
                     before_post = reconstruct(&mut e);
                     pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("post after reconstruction"), timestamp_writes: pair(8) });
                     tl_dispatch(&mut pass, false);
@@ -643,11 +642,8 @@ impl LiveCore {
                 }
             }
             drop(pass);
-            if let (Some(t), Some(slot)) = (&self.timer, timed) {
-                if !use_provider {
-                    t.resolve_pair(&mut e, slot, 1, true);
-                }
-                t.resolve_pair(&mut e, slot, 4, use_provider);
+            if let Some(t) = &self.timer {
+                mapping = t.resolve_written(&mut e);
             }
         }
         if let (Some((read, _)), Some(count), true) = (&self.guard_read, &self.targets.kernel.guard, guard_free) {
@@ -664,10 +660,18 @@ impl LiveCore {
             state.store(1, Ordering::Release);
             read.slice(..).map_async(wgpu::MapMode::Read, move |r| state.store(if r.is_ok() { 2 } else { 0 }, Ordering::Release));
         }
-        if let (Some(t), Some(slot)) = (&self.timer, timed) {
-            let state = t.reads[slot].1.clone();
-            state.store(1, Ordering::Release);
-            t.reads[slot].0.slice(..).map_async(wgpu::MapMode::Read, move |r| state.store(if r.is_ok() { 2 } else { 0 }, Ordering::Release));
+        let particles = self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some();
+        if let Some(t) = &mut self.timer {
+            for k in mapping {
+                let state = t.reads[k].1.clone();
+                state.store(1, Ordering::Release);
+                t.reads[k].0.slice(..).map_async(wgpu::MapMode::Read, move |r| state.store(if r.is_ok() { 2 } else { 0 }, Ordering::Release));
+            }
+            // This frame's stamps are written: resolved in the next frame (bits: the pairs that ran).
+            if let Some(slot) = timed {
+                t.ran[slot] = 0b11 | (weighed as u8) << 2 | (particles as u8) << 3 | (use_provider as u8) << 4;
+                t.reads[slot].1.store(3, Ordering::Release);
+            }
         }
         // Without timestamps: GPU time ~ submit -> completion (the queue is idle at submit when the frame fits the budget).
         if measure {

@@ -1204,8 +1204,8 @@ mod timer_tests {
 
     #[test]
     fn a_post_pass_from_another_frame_counts_by_its_own_length() {
-        // Two frames of the crowd scene (ns, period 1): frame 453 as read, and frame 454, whose slot read frame 458's
-        // post pair (74.5 ms after its trace began).
+        // Two reads of the crowd scene (ns, period 1), from when a slot's stamps were resolved in their own command
+        // buffers: one frame's, and a mix of two uses of the slot (the post pair 74.5 ms after the trace's).
         let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0, 0, 0];
         let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0, 0, 0];
         let ms = |t: [u64; 10]| frame_gpu_ms(&t, 1, 1.0).unwrap();
@@ -1231,8 +1231,6 @@ mod timer_tests {
         near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 11_300_000, 12_000_000], 10.0);
         // A late post pass: the trace, then from the second pair's begin to the fifth's end.
         near([2_000_000, 9_000_000, 29_200_000, 30_500_000, 0, 0, 0, 0, 31_300_000, 32_000_000], 7.0 + 2.8);
-        // The fifth pair of a later frame (35 ms on): the frame to its second pair's end, and the fifth's own length.
-        near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 45_300_000, 46_000_000], 8.5 + 0.7);
         // Without a provider the fifth pair is zeros: the post pass ends the frame.
         near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 0, 0], 8.5);
     }
