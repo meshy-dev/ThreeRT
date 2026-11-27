@@ -2694,13 +2694,15 @@ pub struct Tlas {
 /// writes only the slots that changed (PATCH.md).
 #[derive(Debug, Default)]
 pub(crate) struct TlasSlots {
-    /// Each slot's BLAS (None: an empty slot, written as `null`'s copy with mask 0 and no extent).
+    /// Each slot's BLAS (None: an empty slot, written as `null`'s copy with mask 0, at a point: `null_at`).
     pub(crate) blas: Vec<Option<Arc<Blas>>>,
     /// The BLASes the slots name, each once, with how many slots name it: the TLAS's dependencies.
     pub(crate) refs: crate::FastHashMap<usize, (Arc<Blas>, u32)>,
     /// What the empty slots name: the first BLAS the TLAS was given, held for as long as the TLAS (an empty slot written
     /// with another must not outlive it).
     pub(crate) null: Option<Arc<Blas>>,
+    /// Where the empty slots stand: where the instance that gave `null` stood.
+    pub(crate) null_at: [f32; 3],
 }
 
 impl Drop for Tlas {

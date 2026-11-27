@@ -246,6 +246,44 @@ pub(crate) fn build_acceleration_structures(
             slots.blas.resize(total, None);
         }
         let key = |b: &Arc<Blas>| Arc::as_ptr(b) as usize;
+        // What the empty slots name, and where they stand: the first instance the TLAS is given, before any slot of
+        // this build is written (an empty slot ahead of it in the list is written with it too).
+        let had_null = slots.null.is_some();
+        if !had_null {
+            if let Some(first) = package.instances.iter().flatten().next() {
+                slots.null = Some(first.blas.clone());
+                slots.null_at = [first.transform[3], first.transform[7], first.transform[11]];
+            }
+        }
+        // An empty slot: the null BLAS at a point (its size times EMPTY_SCALE), mask 0: never hit, and an instance as
+        // any other to the structure's build. (Not a zero transform: among instances without extent Metal's
+        // structure lost a scene's only wall to every ray, and a ray from the world origin its hits.)
+        const EMPTY_SCALE: f32 = 1.0e-6;
+        let empty_device = state.device.clone();
+        let empty = |null: &Arc<Blas>, at: [f32; 3]| {
+            empty_device.raw().tlas_instance_to_bytes(hal::TlasInstance {
+                transform: [EMPTY_SCALE, 0.0, 0.0, at[0], 0.0, EMPTY_SCALE, 0.0, at[1], 0.0, 0.0, EMPTY_SCALE, at[2]],
+                custom_data: 0,
+                mask: 0,
+                blas_address: null.handle,
+                pipeline_intersection_data_offset: 0,
+            })
+        };
+        // (one copy a run of adjacent slots)
+        fn put(copies: &mut Vec<hal::BufferCopy>, staging: &mut Vec<u8>, k: usize, bytes: Vec<u8>) {
+            let (at, len) = (staging.len() as u64, bytes.len() as u64);
+            match copies.last_mut() {
+                Some(c) if c.src_offset + c.size.get() == at && c.dst_offset + c.size.get() == k as u64 * len => {
+                    c.size = wgt::BufferSize::new(c.size.get() + len).unwrap();
+                }
+                _ => {
+                    if let Some(size) = wgt::BufferSize::new(len) {
+                        copies.push(hal::BufferCopy { src_offset: at, dst_offset: k as u64 * len, size });
+                    }
+                }
+            }
+            staging.extend(bytes);
+        }
         // (the slots of the changed ranges, in order, as `instances` lists them)
         let slots_of = package.ranges.iter().flat_map(|r| r.start as usize..(r.end as usize).min(total));
         let mut copies: Vec<hal::BufferCopy> = Vec::new();
@@ -290,9 +328,6 @@ pub(crate) fn build_acceleration_structures(
                 }
                 if let Some(b) = &new {
                     slots.refs.entry(key(b)).or_insert_with(|| (b.clone(), 0)).1 += 1;
-                    if slots.null.is_none() {
-                        slots.null = Some(b.clone());
-                    }
                 }
                 slots.blas[k] = new;
             }
@@ -304,15 +339,9 @@ pub(crate) fn build_acceleration_structures(
                     blas_address: instance.blas.handle,
                     pipeline_intersection_data_offset: 0,
                 }),
-                // (an empty slot: the null BLAS, no extent, no mask; with no BLAS yet, nothing names it)
+                // (an empty slot; with no BLAS yet nothing names it, and the build takes no instance)
                 None => match &slots.null {
-                    Some(null) => state.device.raw().tlas_instance_to_bytes(hal::TlasInstance {
-                        transform: [0.0; 12],
-                        custom_data: 0,
-                        mask: 0,
-                        blas_address: null.handle,
-                        pipeline_intersection_data_offset: 0,
-                    }),
+                    Some(null) => empty(null, slots.null_at),
                     None => {
                         let size = state.device.raw().tlas_instance_to_bytes(hal::TlasInstance {
                             transform: [0.0; 12],
@@ -325,19 +354,26 @@ pub(crate) fn build_acceleration_structures(
                     }
                 },
             };
-            // (one copy a run of adjacent slots)
-            let (at, len) = (instance_buffer_staging_source.len() as u64, bytes.len() as u64);
-            match copies.last_mut() {
-                Some(c) if c.src_offset + c.size.get() == at && c.dst_offset + c.size.get() == k as u64 * len => {
-                    c.size = wgt::BufferSize::new(c.size.get() + len).unwrap();
-                }
-                _ => {
-                    if let Some(size) = wgt::BufferSize::new(len) {
-                        copies.push(hal::BufferCopy { src_offset: at, dst_offset: k as u64 * len, size });
+            put(&mut copies, &mut instance_buffer_staging_source, k, bytes);
+        }
+        // The TLAS's first BLAS has come: the slots that were empty before it were written as nothing (the builds
+        // until now took no instance); each is written as an empty slot now.
+        if !had_null {
+            if let Some(null) = slots.null.clone() {
+                let mut written = alloc::vec![false; total];
+                for r in package.ranges.iter() {
+                    for k in r.start as usize..(r.end as usize).min(total) {
+                        written[k] = true;
                     }
                 }
+                for k in 0..total {
+                    if !written[k] && slots.blas[k].is_none() {
+                        put(&mut copies, &mut instance_buffer_staging_source, k, empty(&null, slots.null_at));
+                    }
+                }
+                // (in slot order, as the copies of a build are)
+                copies.sort_by_key(|c| c.dst_offset);
             }
-            instance_buffer_staging_source.extend(bytes);
         }
         // The TLAS's dependencies: each BLAS once (the null one among them).
         let mut dependencies: Vec<Arc<Blas>> = slots.refs.values().map(|(b, _)| b.clone()).collect();

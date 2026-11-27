@@ -5376,3 +5376,52 @@ fn the_gpu_weighs_the_emitters_as_the_cpu_does() {
 fn the_gpu_weighs_the_emitters_as_the_cpu_does_without_a_tree() {
     weights_on_the_gpu(100);
 }
+
+/// One emissive wall 50 m before a camera at `at`, in a scene with room for edits (its top-level structure has empty
+/// slots): the picture after 16 frames. Wherever the camera stands it sees the wall: at the world's origin too, where
+/// an empty slot must not stand in a ray's way.
+fn wall_seen_from(at: Vec3, marker: bool) -> Option<(LiveCore, Vec<u8>)> {
+    let mut w = World::default();
+    w.set_material(5, serde_json::from_value(serde_json::json!({ "name": "wall", "color": [0.0, 0.0, 0.0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 100.0, "doubleSided": true })).unwrap());
+    let s = 50.0;
+    w.set_geometry(2, Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] }).unwrap();
+    // (A mesh the scene may edit: the scene gets its room.)
+    w.set_object(10, "wall".into(), None, Kind::Mesh { geometry: 2, material: 5, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(10, at + Vec3::new(0.0, 0.0, -50.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    if marker {
+        // (The scene's first instance stands where the camera does: the empty slots stand at that point.)
+        w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0.0, "doubleSided": true })).unwrap());
+        w.set_geometry(3, Geometry { positions: vec![-0.1, -0.1, 0.0, 0.1, -0.1, 0.0, 0.1, 0.1, 0.0, -0.1, 0.1, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] }).unwrap();
+        w.set_object(3, "marker".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+        // (Turned edge-on to the view: the camera in its plane sees nothing of it.)
+        w.set_transform(3, at, glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+    }
+    w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(8.0))), true, false).unwrap();
+    w.set_transform(4, at, glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_settings(Settings { camera: Some(4), ..Default::default() });
+    let presets = crate::default_presets_dir();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let p = picture(&mut live, 16);
+    Some((live, p))
+}
+
+#[test]
+fn the_camera_at_the_worlds_origin_sees_what_it_sees_elsewhere() {
+    for marker in [false, true] {
+        let what = if marker { "the empty slots at the camera" } else { "the empty slots at the wall" };
+        let Some((_, elsewhere)) = wall_seen_from(Vec3::new(0.31, 0.17, 0.23), marker) else { return };
+        let Some((live, origin)) = wall_seen_from(Vec3::ZERO, marker) else { return };
+        let (a, b) = (region_mean(&origin, [0, 0, 96, 54]), region_mean(&elsewhere, [0, 0, 96, 54]));
+        eprintln!("ROOM ({what}): {} records of room, {} instances, hardware traversal {}; picture means {a:.1} at the origin, {b:.1} elsewhere; first instance at {:?}", live.sc.up.room.records, live.sc.instances.len(), live.g.hwrt, live.sc.instances.first().map(|i| i.world.w_axis.truncate()));
+        assert!(!live.g.hwrt || live.sc.up.room.records > 0, "{what}: the scene has room for edits: empty slots in its top-level structure");
+        assert!(b > 30.0, "{what}: the wall is seen from 0.4 m off the origin: {b}");
+        let d = apart(&origin, &elsewhere);
+        assert!(d < 1.0, "{what}: from the world's origin the picture is {d:.2} steps from the one seen 0.4 m away (means {a:.1} for {b:.1})");
+    }
+}
