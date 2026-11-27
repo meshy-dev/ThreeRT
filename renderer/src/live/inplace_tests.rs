@@ -1297,6 +1297,8 @@ fn lit_as_a_build(what: &str, live: &mut LiveCore, fresh: &mut LiveCore) {
     // (After a frame: the weights an edit left dirty are made by then.)
     let (tl, tf) = (kernel_total(live), kernel_total(fresh));
     assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
+    // (And the build's table, which its first frame made on the GPU, is what the CPU makes of the same scene.)
+    weights_as_the_cpus(&format!("{what}, the build"), fresh);
     assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
 }
 
