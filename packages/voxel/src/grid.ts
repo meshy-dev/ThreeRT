@@ -27,12 +27,15 @@ export interface VoxelLayout {
   stats: { bricks: number; uniform: number; voxels: number };
 }
 
+/** An integer in -n..n - 1. */
+const within = (c: number, n: number) => Number.isInteger(c) && c >= -n && c < n;
+
 const f32bits = (v: number) => new Uint32Array(new Float32Array([v]).buffer)[0];
 
 export class VoxelGrid {
   /** Voxel size, m. */
   readonly size: number;
-  /** Bricks by key (brick coordinates offset by 2^9 so negatives pack): 512 bytes each. */
+  /** Bricks by key (brick coordinates -512..511 offset by 2^9 so negatives pack): 512 bytes each. */
   private readonly bricks = new Map<number, Uint8Array>();
 
   constructor(size = 0.1) {
@@ -40,21 +43,33 @@ export class VoxelGrid {
     this.size = size;
   }
 
+  /** Whether brick (bx, by, bz) is in the grid's range: integers -512..511 on each axis (voxels -4096..4095). */
+  static inRange(bx: number, by: number, bz: number): boolean {
+    return within(bx, 512) && within(by, 512) && within(bz, 512);
+  }
+
   private static key(bx: number, by: number, bz: number): number {
-    if (Math.abs(bx) >= 512 || Math.abs(by) >= 512 || Math.abs(bz) >= 512) throw new Error("VoxelGrid: more than 4096 voxels from the origin");
+    if (!VoxelGrid.inRange(bx, by, bz)) throw new Error(`VoxelGrid: brick (${bx}, ${by}, ${bz}) is not integers -512..511 (voxels -4096..4095)`);
     return ((bx + 512) * 1024 + (by + 512)) * 1024 + (bz + 512);
+  }
+
+  /** Voxel (x, y, z)'s brick key. Checked before the shifts: `x >> 3` of a fraction, NaN or a coordinate past 2^31 is
+   *  some other voxel's brick (2^32 + 5 is voxel 5's). */
+  private static voxelKey(x: number, y: number, z: number): number {
+    if (!within(x, 4096) || !within(y, 4096) || !within(z, 4096)) throw new Error(`VoxelGrid: voxel (${x}, ${y}, ${z}) is not integers -4096..4095`);
+    return VoxelGrid.key(x >> 3, y >> 3, z >> 3);
   }
 
   /** Material of voxel (x, y, z): 0 = empty. */
   get(x: number, y: number, z: number): number {
-    const b = this.bricks.get(VoxelGrid.key(x >> 3, y >> 3, z >> 3));
+    const b = this.bricks.get(VoxelGrid.voxelKey(x, y, z));
     return b ? b[(x & 7) + 8 * (y & 7) + 64 * (z & 7)] : 0;
   }
 
   /** Sets voxel (x, y, z) to `m` (0 clears it; 1..255 a palette entry). */
   set(x: number, y: number, z: number, m: number): void {
     if (!Number.isInteger(m) || m < 0 || m > 255) throw new Error(`VoxelGrid: material ${m} is not 0..255`);
-    const k = VoxelGrid.key(x >> 3, y >> 3, z >> 3);
+    const k = VoxelGrid.voxelKey(x, y, z);
     let b = this.bricks.get(k);
     if (!b) {
       if (m === 0) return;

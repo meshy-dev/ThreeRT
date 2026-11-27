@@ -66,6 +66,29 @@ test(".vox: round trip, z-up to y-up, malformed files refused", () => {
   assert.equal(parseVox(encodeVox([{ size: [1, 1, 1], voxels: new Uint8Array([0, 0, 0, 1]) }])).palette[200] & 0xff, 200, "grey palette without RGBA");
 });
 
+test("encodeVox writes only files parseVox reads: a broken model is refused, not written", () => {
+  const ok = { size: [2, 2, 2] as [number, number, number], voxels: new Uint8Array([1, 1, 1, 7]) };
+  assert.equal(voxGrid(parseVox(encodeVox([ok])).models[0]).get(1, 1, 0), 7);
+  const refused = (models: Parameters<typeof encodeVox>[0], palette?: Uint32Array) => assert.throws(() => encodeVox(models, palette), RangeError);
+  refused([]); // parseVox: "no model"
+  refused([{ size: [2, 2, 2], voxels: new Uint8Array([1, 1, 1, 7, 0, 0]) }]); // a partial record, dropped silently before
+  refused([{ size: [2, 2, 2], voxels: new Uint8Array([2, 0, 0, 7]) }]); // parseVox: "a voxel outside its model"
+  refused([{ size: [0, 2, 2], voxels: new Uint8Array(0) }]); // parseVox: size out of range
+  refused([{ size: [2.5, 2, 2], voxels: new Uint8Array(0) }]);
+  refused([ok], new Uint32Array(16)); // entries 16..255 written as 0 before
+});
+
+test(".vox: a chunk is read only within MAIN's children, as its length says", () => {
+  const vox = encodeVox([{ size: [1, 1, 1], voxels: new Uint8Array([0, 0, 0, 1]) }]);
+  // MAIN's children cut short (24 bytes: the SIZE chunk) and the rest still in the file: XYZI is past MAIN's end.
+  const short = vox.slice();
+  new DataView(short.buffer).setUint32(16, 24 + 6, true);
+  assert.throws(() => parseVox(short), /past MAIN's children/);
+  new DataView(short.buffer).setUint32(16, 12, true); // ends inside the SIZE chunk
+  assert.throws(() => parseVox(short), /past MAIN's children/);
+  assert.equal(parseVox(vox).models.length, 1);
+});
+
 test("bulk writes: brick() and fillBrick()", () => {
   const g = new VoxelGrid(0.1);
   g.fillBrick(1, 0, -1, 9);
@@ -76,6 +99,31 @@ test("bulk writes: brick() and fillBrick()", () => {
   g.fillBrick(1, 0, -1, 0);
   assert.equal(g.get(8, 0, -8), 0);
   assert.equal(g.layout().stats.voxels, 1);
+});
+
+test("voxel coordinates are integers -4096..4095 on every axis: no other voxel is written for one outside", () => {
+  const g = new VoxelGrid(0.1);
+  // `x >> 3` and `x & 7` of these are voxel (5, 0, 0) or (0, 0, 0)'s: refused, not written there.
+  for (const x of [2 ** 32 + 5, NaN, 0.5, -0.5, Infinity, 4096, -4097]) {
+    assert.throws(() => g.set(x, 0, 0, 9), /not integers/, `set(${x})`);
+    assert.throws(() => g.get(0, x, 0), /not integers/, `get(${x})`);
+  }
+  assert.throws(() => g.fill(0, 0, 0.5, 1, 1, 1.5, 9), /not integers/);
+  assert.equal(g.get(5, 0, 0), 0);
+  assert.equal(g.get(0, 0, 0), 0);
+  assert.equal(g.layout().stats.voxels, 0, "nothing written");
+  // The range is the brick key's, -512..511 bricks: as far below the origin as above it.
+  g.set(-4096, -4096, -4096, 3);
+  g.set(4095, 4095, 4095, 4);
+  assert.equal(g.get(-4096, -4096, -4096), 3);
+  assert.equal(g.get(4095, 4095, 4095), 4);
+  assert.deepEqual([...g.nonEmpty()].map(([x, y, z]) => [x, y, z]).sort((a, b) => a[0] - b[0]), [[-512, -512, -512], [511, 511, 511]]);
+  g.fillBrick(-512, 0, 0, 7);
+  assert.equal(g.get(-4089, 7, 7), 7);
+  assert.throws(() => g.fillBrick(512, 0, 0, 7), /brick/);
+  assert.throws(() => g.brick(0, 1.5, 0), /brick/);
+  assert.equal(VoxelGrid.inRange(-512, 511, 0), true);
+  assert.equal(VoxelGrid.inRange(-513, 0, 0), false);
 });
 
 /** An engine for the voxel bodies' tests: the binding's (a recording engine) and the voxel calls, answering the

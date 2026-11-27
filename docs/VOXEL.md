@@ -807,8 +807,9 @@ Where it runs (the user, 2026-11-10):
 ## Voxel data (`packages/voxel`)
 
 A voxel object is a `VoxelGrid`: sparse 8³ bricks, a byte per voxel (0 empty, 1..255 a palette entry, the index of the
-`ProceduralMesh`'s material). `layout(granularity)` turns it into procedural geometry (docs/MATERIAL_FUNCTIONS.md,
-"Geometry functions"):
+`ProceduralMesh`'s material). Voxel coordinates are integers -4096..4095 on each axis (bricks -512..511, the key's
+range); others are refused, not wrapped onto another voxel by the brick shifts. `layout(granularity)` turns it into
+procedural geometry (docs/MATERIAL_FUNCTIONS.md, "Geometry functions"):
 
 - **Data** (32-bit words from the geometry's data start):
 
@@ -829,8 +830,8 @@ A voxel object is a `VoxelGrid`: sparse 8³ bricks, a byte per voxel (0 empty, 1
   the brick, not on the summed step times, which drift from the brick's exit time (that drift read neighbouring bits:
   phantom bricks). An axis the ray does not move along never bounds its hit test (entered at −∞, left at +∞): with
   the reciprocal's stand-in, axis-aligned rays missed every voxel (Bugbot; `voxel/shadow-axis`).
-- **Files**: `parseVox` reads MagicaVoxel models and the palette (other chunks skipped; every length checked: a file may
-  come from an untrusted game); `voxGrid` turns its z-up axes to y-up; `paletteMaterials` makes the palette materials.
+- **Files**: `parseVox` reads MagicaVoxel models and the palette (other chunks skipped; every length checked, each chunk
+  within MAIN's children: a file may come from an untrusted game); `encodeVox` refuses what `parseVox` would; `voxGrid` turns its z-up axes to y-up; `paletteMaterials` makes the palette materials.
   `tools/voxel-build.ts` writes a `.vox` file's models as procedural geometry assets for `fromAsset`, so a level's
   voxels never pass through the scene runtime.
 - **Triangles**: `greedyMesh(grid, origin, solidOutside)` gives the object's exposed faces (a set voxel next to an empty

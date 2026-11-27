@@ -43,9 +43,11 @@ export function parseVox(buf: ArrayBuffer | Uint8Array): VoxFile {
   let palette: Uint32Array | null = null;
   while (o < end) {
     need(o, 12, "a chunk header");
+    if (o + 12 > end) throw new Error(".vox: a chunk header runs past MAIN's children");
     const id = tag(o), n = view.getUint32(o + 4, true), m = view.getUint32(o + 8, true);
     const c = o + 12;
     need(c, n + m, `chunk ${id}`);
+    if (c + n + m > end) throw new Error(`.vox: chunk ${id} runs past MAIN's children`);
     if (id === "SIZE") {
       if (n < 12) throw new Error(".vox: SIZE chunk too short");
       size = [view.getUint32(c, true), view.getUint32(c + 4, true), view.getUint32(c + 8, true)];
@@ -84,8 +86,21 @@ export function voxGrid(model: VoxModel, size = 0.1): VoxelGrid {
   return g;
 }
 
-/** A `.vox` file of `models` and `palette` (0xAABBGGRR, entry k = palette index k): tests and tools. */
+/**
+ * A `.vox` file of `models` and `palette` (0xAABBGGRR, entry k = palette index k; 256 entries): tests and tools. What
+ * `parseVox` would refuse is refused here (RangeError) rather than written: a model's voxels are whole (x, y, z, index)
+ * records inside its size.
+ */
 export function encodeVox(models: VoxModel[], palette?: Uint32Array): Uint8Array {
+  if (models.length === 0) throw new RangeError("encodeVox: no model");
+  models.forEach((m, k) => {
+    if (m.size.length !== 3 || m.size.some((v) => !Number.isInteger(v) || v < 1 || v > 2048)) throw new RangeError(`encodeVox: model ${k}'s size ${m.size.join(" x ")} is not 1..2048 a side`);
+    if (m.voxels.length % 4 !== 0) throw new RangeError(`encodeVox: model ${k}'s voxels are ${m.voxels.length} bytes, not (x, y, z, index) records`);
+    for (let v = 0; v < m.voxels.length; v += 4) {
+      if (m.voxels[v] >= m.size[0] || m.voxels[v + 1] >= m.size[1] || m.voxels[v + 2] >= m.size[2]) throw new RangeError(`encodeVox: model ${k}'s voxel ${v / 4} is outside its size`);
+    }
+  });
+  if (palette && palette.length !== 256) throw new RangeError(`encodeVox: a palette is 256 entries, not ${palette.length}`);
   const chunk = (id: string, content: Uint8Array) => {
     const out = new Uint8Array(12 + content.length);
     const v = new DataView(out.buffer);
