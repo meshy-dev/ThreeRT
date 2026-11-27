@@ -174,6 +174,14 @@ export class Vector3 {
   lerp(v: Vector3, t: number): this {
     return this.set(this.x + (v.x - this.x) * t, this.y + (v.y - this.y) * t, this.z + (v.z - this.z) * t);
   }
+  /** From world space to the camera's normalized device coordinates, as three.js does. */
+  project(camera: { matrixWorldInverse: Matrix4; projectionMatrix: Matrix4 }): this {
+    return this.applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+  }
+  /** From the camera's normalized device coordinates back to world space, as three.js does. */
+  unproject(camera: { projectionMatrixInverse: Matrix4; matrixWorld: Matrix4 }): this {
+    return this.applyMatrix4(camera.projectionMatrixInverse).applyMatrix4(camera.matrixWorld);
+  }
   applyMatrix4(m: Matrix4): this {
     const e = m.elements;
     const { x, y, z } = this;
@@ -565,6 +573,12 @@ export class Euler {
   }
 }
 
+/** Clip space with depth -1..1, as WebGL has it (three.js's constant). */
+export const WebGLCoordinateSystem = 2000;
+/** Clip space with depth 0..1, as WebGPU has it (three.js's constant). */
+export const WebGPUCoordinateSystem = 2001;
+export type CoordinateSystem = typeof WebGLCoordinateSystem | typeof WebGPUCoordinateSystem;
+
 export class Matrix4 {
   elements: number[];
   constructor() {
@@ -795,6 +809,99 @@ export class Matrix4 {
   }
   makeScale(x: number, y: number, z: number): this {
     return this.set(x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1);
+  }
+  /** A shear: `xy` is how much x moves per unit of y, and so on (three.js's argument order). */
+  makeShear(xy: number, xz: number, yx: number, yz: number, zx: number, zy: number): this {
+    return this.set(1, yx, zx, 0, xy, 1, zy, 0, xz, yz, 1, 0, 0, 0, 0, 1);
+  }
+  /** The rotation of `euler` in its order, with no translation, as three.js computes it. */
+  makeRotationFromEuler(euler: Euler): this {
+    const te = this.elements;
+    const x = euler.x, y = euler.y, z = euler.z;
+    const a = Math.cos(x), b = Math.sin(x), c = Math.cos(y), d = Math.sin(y), e = Math.cos(z), f = Math.sin(z);
+    if (euler.order === "XYZ") {
+      const ae = a * e, af = a * f, be = b * e, bf = b * f;
+      te[0] = c * e; te[4] = -c * f; te[8] = d;
+      te[1] = af + be * d; te[5] = ae - bf * d; te[9] = -b * c;
+      te[2] = bf - ae * d; te[6] = be + af * d; te[10] = a * c;
+    } else if (euler.order === "YXZ") {
+      const ce = c * e, cf = c * f, de = d * e, df = d * f;
+      te[0] = ce + df * b; te[4] = de * b - cf; te[8] = a * d;
+      te[1] = a * f; te[5] = a * e; te[9] = -b;
+      te[2] = cf * b - de; te[6] = df + ce * b; te[10] = a * c;
+    } else if (euler.order === "ZXY") {
+      const ce = c * e, cf = c * f, de = d * e, df = d * f;
+      te[0] = ce - df * b; te[4] = -a * f; te[8] = de + cf * b;
+      te[1] = cf + de * b; te[5] = a * e; te[9] = df - ce * b;
+      te[2] = -a * d; te[6] = b; te[10] = a * c;
+    } else if (euler.order === "ZYX") {
+      const ae = a * e, af = a * f, be = b * e, bf = b * f;
+      te[0] = c * e; te[4] = be * d - af; te[8] = ae * d + bf;
+      te[1] = c * f; te[5] = bf * d + ae; te[9] = af * d - be;
+      te[2] = -d; te[6] = b * c; te[10] = a * c;
+    } else if (euler.order === "YZX") {
+      const ac = a * c, ad = a * d, bc = b * c, bd = b * d;
+      te[0] = c * e; te[4] = bd - ac * f; te[8] = bc * f + ad;
+      te[1] = f; te[5] = a * e; te[9] = -b * e;
+      te[2] = -d * e; te[6] = ad * f + bc; te[10] = ac - bd * f;
+    } else if (euler.order === "XZY") {
+      const ac = a * c, ad = a * d, bc = b * c, bd = b * d;
+      te[0] = c * e; te[4] = -f; te[8] = d * e;
+      te[1] = ac * f + bd; te[5] = a * e; te[9] = ad * f - bc;
+      te[2] = bc * f - ad; te[6] = b * e; te[10] = bd * f + ac;
+    }
+    te[3] = 0; te[7] = 0; te[11] = 0;
+    te[12] = 0; te[13] = 0; te[14] = 0; te[15] = 1;
+    return this;
+  }
+  /** A perspective projection of the frustum through `left`..`bottom` at `near`, as three.js builds it: clip-space
+   *  depth -1..1 (WebGL), 0..1 (WebGPU), or 1..0 with `reversedDepth`. */
+  makePerspective(left: number, right: number, top: number, bottom: number, near: number, far: number, coordinateSystem: CoordinateSystem = WebGLCoordinateSystem, reversedDepth = false): this {
+    const te = this.elements;
+    const x = (2 * near) / (right - left), y = (2 * near) / (top - bottom);
+    const a = (right + left) / (right - left), b = (top + bottom) / (top - bottom);
+    let c: number, d: number;
+    if (reversedDepth) {
+      c = near / (far - near);
+      d = (far * near) / (far - near);
+    } else if (coordinateSystem === WebGLCoordinateSystem) {
+      c = -(far + near) / (far - near);
+      d = (-2 * far * near) / (far - near);
+    } else if (coordinateSystem === WebGPUCoordinateSystem) {
+      c = -far / (far - near);
+      d = (-far * near) / (far - near);
+    } else {
+      throw new Error("THREE.Matrix4.makePerspective(): Invalid coordinate system: " + coordinateSystem);
+    }
+    te[0] = x; te[4] = 0; te[8] = a; te[12] = 0;
+    te[1] = 0; te[5] = y; te[9] = b; te[13] = 0;
+    te[2] = 0; te[6] = 0; te[10] = c; te[14] = d;
+    te[3] = 0; te[7] = 0; te[11] = -1; te[15] = 0;
+    return this;
+  }
+  /** An orthographic projection of the box `left`..`far`, with the same depth conventions as `makePerspective`. */
+  makeOrthographic(left: number, right: number, top: number, bottom: number, near: number, far: number, coordinateSystem: CoordinateSystem = WebGLCoordinateSystem, reversedDepth = false): this {
+    const te = this.elements;
+    const x = 2 / (right - left), y = 2 / (top - bottom);
+    const a = -(right + left) / (right - left), b = -(top + bottom) / (top - bottom);
+    let c: number, d: number;
+    if (reversedDepth) {
+      c = 1 / (far - near);
+      d = far / (far - near);
+    } else if (coordinateSystem === WebGLCoordinateSystem) {
+      c = -2 / (far - near);
+      d = -(far + near) / (far - near);
+    } else if (coordinateSystem === WebGPUCoordinateSystem) {
+      c = -1 / (far - near);
+      d = -near / (far - near);
+    } else {
+      throw new Error("THREE.Matrix4.makeOrthographic(): Invalid coordinate system: " + coordinateSystem);
+    }
+    te[0] = x; te[4] = 0; te[8] = 0; te[12] = a;
+    te[1] = 0; te[5] = y; te[9] = 0; te[13] = b;
+    te[2] = 0; te[6] = 0; te[10] = c; te[14] = d;
+    te[3] = 0; te[7] = 0; te[11] = 0; te[15] = 1;
+    return this;
   }
   /** Sets the translation part only. */
   setPosition(x: number | Vector3, y?: number, z?: number): this {
@@ -1426,6 +1533,31 @@ export class Box3 {
   }
   intersectsBox(b: Box3): boolean {
     return b.max.x >= this.min.x && b.min.x <= this.max.x && b.max.y >= this.min.y && b.min.y <= this.max.y && b.max.z >= this.min.z && b.min.z <= this.max.z;
+  }
+  /** Separating-axis test against a triangle (`{ a, b, c }`, such as a Triangle), as three.js does. */
+  intersectsTriangle(triangle: { a: Vector3; b: Vector3; c: Vector3 }): boolean {
+    if (this.isEmpty()) return false;
+    const center = this.getCenter(new Vector3());
+    const extents = new Vector3().subVectors(this.max, center);
+    const v0 = new Vector3().subVectors(triangle.a, center);
+    const v1 = new Vector3().subVectors(triangle.b, center);
+    const v2 = new Vector3().subVectors(triangle.c, center);
+    const f0 = new Vector3().subVectors(v1, v0), f1 = new Vector3().subVectors(v2, v1), f2 = new Vector3().subVectors(v0, v2);
+    const sat = (axes: number[]): boolean => {
+      const axis = new Vector3();
+      for (let i = 0; i <= axes.length - 3; i += 3) {
+        axis.fromArray(axes, i);
+        const r = extents.x * Math.abs(axis.x) + extents.y * Math.abs(axis.y) + extents.z * Math.abs(axis.z);
+        const p0 = v0.dot(axis), p1 = v1.dot(axis), p2 = v2.dot(axis);
+        if (Math.max(-Math.max(p0, p1, p2), Math.min(p0, p1, p2)) > r) return false;
+      }
+      return true;
+    };
+    // The nine cross products of the box's axes with the triangle's edges, the box's face normals, the triangle's normal.
+    if (!sat([0, -f0.z, f0.y, 0, -f1.z, f1.y, 0, -f2.z, f2.y, f0.z, 0, -f0.x, f1.z, 0, -f1.x, f2.z, 0, -f2.x, -f0.y, f0.x, 0, -f1.y, f1.x, 0, -f2.y, f2.x, 0])) return false;
+    if (!sat([1, 0, 0, 0, 1, 0, 0, 0, 1])) return false;
+    const n = new Vector3().crossVectors(f0, f1);
+    return sat([n.x, n.y, n.z]);
   }
   copy(b: Box3): this {
     return this.set(b.min, b.max);

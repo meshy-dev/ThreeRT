@@ -1,4 +1,9 @@
 export * from "./math.ts";
+export { Box2 } from "./box2.ts";
+export { Vector4 } from "./vector4.ts";
+export { Triangle } from "./triangle.ts";
+export { Frustum } from "./frustum.ts";
+export * from "./curves.ts";
 export * from "./geometry.ts";
 export * from "./interleaved.ts";
 export * from "./core.ts";

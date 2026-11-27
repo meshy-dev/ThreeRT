@@ -1,7 +1,7 @@
 // Three-like scene graph. Only the subset that maps cleanly onto a physically based renderer is exposed; everything
 // uses physical units (see engine.ts, which binds a scene to the engine).
 
-import { Color, type ColorLike, Euler, Matrix4, Quaternion, Vector2, Vector3 } from "./math.ts";
+import { Color, type ColorLike, type CoordinateSystem, Euler, Matrix4, Quaternion, Vector2, Vector3, WebGLCoordinateSystem } from "./math.ts";
 import { type BufferGeometry, StaticDrawUsage } from "./geometry.ts";
 import type { ExposureDesc, Vec3 } from "./engine.ts";
 
@@ -2269,6 +2269,7 @@ export class PerspectiveCamera extends Object3D {
     this.aspect = aspect;
     this.near = near;
     this.far = far;
+    this.updateProjectionMatrix();
   }
   protected override get looksDownNegativeZ(): boolean {
     return true;
@@ -2299,8 +2300,30 @@ export class PerspectiveCamera extends Object3D {
   getFilmHeight(): number {
     return this.filmGauge / Math.max(this.aspect, 1);
   }
-  /** three.js API; the engine reads fov / aspect / near / far as they are. */
-  updateProjectionMatrix(): void {}
+  /** The projection three.js builds from fov, aspect, near and far; updated by `updateProjectionMatrix`. The engine
+   *  reads fov / aspect / near / far as they are: this is for scene code (`Vector3.project`, `Frustum`). */
+  projectionMatrix = new Matrix4();
+  projectionMatrixInverse = new Matrix4();
+  /** The world-to-view matrix: the inverse of `matrixWorld` without its scale, updated with the world matrix. */
+  matrixWorldInverse = new Matrix4();
+  coordinateSystem: CoordinateSystem = WebGLCoordinateSystem;
+  reversedDepth = false;
+  /** Rebuilds `projectionMatrix` (and its inverse) after fov, aspect, near or far change, as three.js does. */
+  updateProjectionMatrix(): void {
+    const near = this.near;
+    const top = near * Math.tan((Math.PI / 180) * 0.5 * this.fov);
+    const height = 2 * top, width = this.aspect * height, left = -0.5 * width;
+    this.projectionMatrix.makePerspective(left, left + width, top, top - height, near, this.far, this.coordinateSystem, this.reversedDepth);
+    this.projectionMatrixInverse.copy(this.projectionMatrix).invert();
+  }
+  /** As Object3D's, then `matrixWorldInverse` from the world matrix without its scale (three.js, glTF's convention). */
+  override updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void {
+    super.updateWorldMatrix(updateParents, updateChildren);
+    const p = new Vector3(), q = new Quaternion(), s = new Vector3();
+    this.matrixWorld.decompose(p, q, s);
+    if (s.x === 1 && s.y === 1 && s.z === 1) this.matrixWorldInverse.copy(this.matrixWorld).invert();
+    else this.matrixWorldInverse.compose(p, q, s.set(1, 1, 1)).invert();
+  }
   /** As Object3D's, exposure and depth of field copied rather than shared (a default exposure stays the default). */
   override copy(source: Object3D, recursive = true): this {
     super.copy(source, recursive);
@@ -2308,6 +2331,9 @@ export class PerspectiveCamera extends Object3D {
       this._defaultExposure = { ...DEFAULT_EXPOSURE };
       this.exposure = source.exposureIsDefault ? this._defaultExposure : { ...source.exposure };
       this.dof = source.dof && { ...source.dof };
+      this.projectionMatrix = source.projectionMatrix.clone();
+      this.projectionMatrixInverse = source.projectionMatrixInverse.clone();
+      this.matrixWorldInverse = source.matrixWorldInverse.clone();
     }
     return this;
   }
