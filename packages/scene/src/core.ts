@@ -1076,6 +1076,13 @@ export class Scene extends Object3D {
    * city's night glow brightens off the cloud base.
    */
   cloudCover = 0;
+
+  /** As `Object3D.copy`, and the copy gets its own fog (three.js clones the source's). */
+  override copy(source: Object3D, recursive = true): this {
+    super.copy(source, recursive);
+    if (source instanceof Scene) this.fog = source.fog?.clone() ?? null;
+    return this;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2448,6 +2455,13 @@ export class ExponentialHeightFog {
     this.volumetric = { scattering, anisotropy };
     return this;
   }
+  /** A fog of the same kind and settings, with its own colour and volumetric settings (three.js's `Fog.clone`). */
+  clone(): this {
+    const c = Object.assign(Object.create(Object.getPrototypeOf(this)) as this, this);
+    c.color = this.color.clone();
+    c.volumetric = structuredClone(this.volumetric);
+    return c;
+  }
   /**
    * From Unreal ExponentialHeightFog settings (UE 5.8 conventions: FogDensity / FogHeightFalloff are per-1000-cm,
    * base-2 terms whose analytic integral comes out as exp(-(ln2)^2 * Int); volumetric fog extinction is
@@ -2511,10 +2525,6 @@ export class FogExp2 extends ExponentialHeightFog {
   readonly isFogExp2 = true;
   constructor(color: ColorLike = 0xffffff, density = 0.00025) {
     super(density, 0, color);
-  }
-  clone(): FogExp2 {
-    const { heightFalloff, intensity, height, startDistance, maxOpacity } = this;
-    return Object.assign(new FogExp2(this.color, this.density), { heightFalloff, intensity, height, startDistance, maxOpacity, volumetric: structuredClone(this.volumetric) });
   }
 }
 
