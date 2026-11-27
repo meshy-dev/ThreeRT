@@ -101,7 +101,7 @@ struct Params {
     size: vec4<u32>,      // width, height, sample index, seed
     counts: vec4<u32>,    // lights, emitters, max bounces, rr depth
     env: vec4<f32>,       // has env map, env width, env height, sun light index (-1 none)
-    misc: vec4<f32>,      // clamp (absolute radiance), emitter total weight, env total weight, _
+    misc: vec4<f32>,      // clamp (absolute radiance), the CPU's copy of the emitters' total weight (read from the table: `emitter_totals`), env total weight, _
     sky_color: vec4<f32>, // constant sky radiance when no env map
     counts2: vec4<u32>,   // directional lights (first in `lights`), environment NEE on, output height for texture LOD (0 = traced height), first shadowed local light
     time: vec4<f32>,      // scene time (s), wetness, rain, -
@@ -115,7 +115,7 @@ struct Params {
     light_lod: vec4<f32>, // live light LOD (lib.rs emitter_lod): reference position, d0 (0 = off)
     emit_power: vec4<f32>, // the emitter CDF's power and cull as the CPU built it (lib.rs `EmitterCull`); not read here
     lod_view: vec4<f32>,   // emitter cull's view cone (lib.rs EmitterCull): forward direction, cos of the half-angle
-    ltree: vec4<f32>,      // light tree (ltree.rs): -, its entry count (bits: the moving emitters' first), P(pick a moving one), candidates at camera hits (0 = off)
+    ltree: vec4<f32>,      // light tree (ltree.rs): -, its entry count (bits: the moving emitters' first), - (the tail's share is the table's: `emitter_totals`), candidates at camera hits (0 = off)
     procs: vec4<u32>,      // procedural geometry (F_PROC): -, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
     background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
@@ -462,6 +462,10 @@ fn emitter_guide(k: u32) -> u32 {
     return bitcast<u32>(emitter_at(P.counts.y + k / 4u)[k % 4u]);
 }
 
+// The table's header, after the guide (lib.rs `emitter_header`): x the total weight, y the share of it outside the
+// light tree. Requires counts.y > 0.
+fn emitter_totals() -> vec4<f32> { return emitter_at(P.counts.y + EMITTER_GUIDE / 4u + 1u); }
+
 // One emitter CDF entry: the first whose cumulative weight is not below u. The guide table bounds the binary search to
 // u's bucket (u * EMITTER_GUIDE is exact for the 24-bit u), which holds the same entry a search over the whole CDF
 // finds. Requires counts.y > 0.
@@ -529,22 +533,24 @@ fn emitter_pick_range(lo: u32, hi: u32, r: f32) -> vec4<f32> {
 }
 
 // An emitter entry for a point x (normal n), its selection probability `p` and its weight `w` (area x luminance x
-// power, as the CDF weighs). With the tree: the moving emitters by power with probability P.ltree.z, else the tree
+// power, as the CDF weighs). With the tree: the moving emitters by power with probability `emitter_totals().y`, else the tree
 // descended by importance to a leaf, and one of its few entries by weight. Without it: the CDF entry (p = weight /
 // total).
 struct EPick { e: vec4<f32>, p: f32, w: f32 };
 
 fn emitter_draw(x: vec3<f32>, n: vec3<f32>, rd: u32) -> EPick {
     let r3 = rng3(rd);
+    let tot = emitter_totals();
+    if (!(tot.x > 0.0)) { return EPick(vec4<f32>(0.0), 0.0, 0.0); }
     if (!lt_on()) {
         let e = emitter_pick_u(r3.x);
-        return EPick(e, e.z / P.misc.y, e.z);
+        return EPick(e, e.z / tot.x, e.z);
     }
-    if (r3.x < P.ltree.z) {
+    if (r3.x < tot.y) {
         let e = emitter_pick_range(bitcast<u32>(P.ltree.y), P.counts.y, r3.y);
-        return EPick(e, e.z / P.misc.y, e.z);
+        return EPick(e, e.z / tot.x, e.z);
     }
-    var p = 1.0 - P.ltree.z;
+    var p = 1.0 - tot.y;
     var u = r3.y;
     var w = bitcast<u32>(lt_node(0u).w);
     for (var k = 0u; k <= LT_PATH_BITS && (w & LT_LEAF) == 0u; k++) {
@@ -576,11 +582,12 @@ fn emitter_draw(x: vec3<f32>, n: vec3<f32>, rd: u32) -> EPick {
 // (its code names its path) by the same choices down the path and its weight in its leaf; any other (its code is its
 // entry in the CDF) by its entry's weight.
 fn emitter_pmf(ei: u32, em: EmitterTri, x: vec3<f32>, n: vec3<f32>) -> f32 {
-    if (P.misc.y <= 0.0) { return 0.0; }
+    let tot = emitter_totals();
+    if (!(tot.x > 0.0)) { return 0.0; }
     let code = em.code & ~EMITTER_MOVES;
-    if ((code >> LT_PATH_BITS) == 0u) { return emitter_at(code).z / P.misc.y; }
+    if ((code >> LT_PATH_BITS) == 0u) { return emitter_at(code).z / tot.x; }
     let depth = (code >> LT_PATH_BITS) - 1u;
-    var p = 1.0 - P.ltree.z;
+    var p = 1.0 - tot.y;
     var w = bitcast<u32>(lt_node(0u).w);
     for (var k = 0u; k < depth; k++) {
         let l = lt_node(w);

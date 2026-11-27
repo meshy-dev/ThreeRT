@@ -2050,17 +2050,24 @@ impl LiveCore {
 
     /// The kernel's emitter parameters for a CDF of this total weight (and the emitters' power) and the tree.
     pub(super) fn emitter_params(&mut self, total: f32, power: f32) {
-        let LoadedScene { tables: e, base: b, .. } = &mut self.sc;
+        let LoadedScene { tables: e, base: b, up, .. } = &mut self.sc;
         b.emit_power[0] = power;
+        // (The CPU's copy of the total: the kernel reads the table's header.)
         b.misc[1] = total;
+        let mut tail = 0.0;
         if let Some(t) = e.light_tree.as_ref() {
             // The tree's entries (with the slot: the static ones and those added in place), the rest by power share.
             if t.dynamic.is_some() {
                 b.ltree[1] = f32::from_bits(t.order.len() as u32);
             }
-            b.ltree[2] = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
+            tail = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
         }
         b.counts[1] = if total > 0.0 { e.emitter_tris.len() as u32 } else { 0 };
+        // The table's header (after whatever wrote the table itself): the total and the tail's share.
+        let at = crate::emitter_header(e.emitter_tris.len()) as u64 * 16;
+        if at + 16 <= up.heap.cap(Table::Emitters) {
+            up.heap.write(&self.g.queue, Table::Emitters, at, bytemuck::cast_slice(&[total, tail, 0.0, 0.0]));
+        }
     }
 
     /// Power edits held back (`Tables::deferred`) to the emitter worker, unless it is on a job (they go with the next,

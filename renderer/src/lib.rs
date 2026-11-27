@@ -430,9 +430,10 @@ pub fn emitter_codes(tris: &[EmitterTri], order: &[u32], tree: Option<&ltree::Li
 }
 
 /// Emitter CDF entries (its emitter's index in `tris`: bits, normalized cumulative weight, weight, area), one per
-/// emitter in `order` (`emitter_order`); then the guide table; the total weight and the total without light LOD
-/// (Params::emit_power). Weight = area x emissive luminance x object power (x light LOD). Triangles switched off
-/// keep a zero-weight entry.
+/// emitter in `order` (`emitter_order`); then the guide table; then the header the kernel reads the totals from
+/// (`emitter_header`: the total weight here, the tail's share for whoever has the tree); the total weight and the
+/// total without light LOD (Params::emit_power). Weight = area x emissive luminance x object power (x light LOD).
+/// Triangles switched off keep a zero-weight entry.
 /// Guide table (the cutpoint method): EMITTER_GUIDE + 1 indices, four per vec4 (bits); index k is where the kernel's
 /// binary search lands for u = k / EMITTER_GUIDE, so a draw u only searches between the indices of its bucket and the
 /// next, and finds the same entry as a search over the whole CDF.
@@ -464,7 +465,15 @@ pub fn emitter_cdf(tris: &[EmitterTri], order: &[u32], materials: &[scene::GpuMa
         })
         .collect();
     out.extend(guide.chunks(4).map(|c| std::array::from_fn(|j| f32::from_bits(c.get(j).copied().unwrap_or(0)))));
+    out.push([total, 0.0, 0.0, 0.0]);
     (out, total, power)
+}
+
+/// Where the emitter table of `n` emitters has its header (pathtrace.wgsl `emitter_totals`): after the entries and
+/// the guide. (The total weight, the share of it outside the light tree: `emitter_draw` takes the tail with that
+/// probability.)
+pub fn emitter_header(n: usize) -> usize {
+    n + (EMITTER_GUIDE + 1).div_ceil(4)
 }
 
 /// Height fog and volumetric fog kernel parameters (`Params::fog`, `fog_color`, `vol`, `vol2`).
@@ -650,9 +659,10 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         g.code = code;
     }
     let emitter_runs = EmitterRuns::of(&emitter_tris);
-    let (emitters, total, _) = emitter_cdf(&emitter_tris, &order, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
+    let (mut emitters, total, _) = emitter_cdf(&emitter_tris, &order, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
     // The moving emitters (after the tree's in the CDF) are picked with the probability of their share of power.
     let ltree_param = light_tree.as_ref().map_or([0.0; 4], |t| [0.0, f32::from_bits(t.order.len() as u32), if total > 0.0 { ((total - t.power) / total).max(0.0) } else { 0.0 }, ltree::RIS_OFFLINE as f32]);
+    emitters[emitter_header(emitter_tris.len())][1] = ltree_param[2];
 
     // Sky / environment.
     let t = Instant::now();
@@ -1450,7 +1460,8 @@ mod light_lod_tests {
         let (t, total, _) = emitter_cdf(&tris, &emitter_order(&tris, None), &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
         let n = tris.len() as u32;
         assert!(total > 0.0);
-        assert_eq!(t.len(), tris.len() + (EMITTER_GUIDE + 1).div_ceil(4));
+        assert_eq!(t.len(), emitter_header(tris.len()) + 1);
+        assert_eq!(t[emitter_header(tris.len())], [total, 0.0, 0.0, 0.0]);
         // pathtrace.wgsl: the search over [lo, hi), the guide table, emitter_pick.
         let search = |mut lo: u32, mut hi: u32, u: f32| {
             while lo < hi {

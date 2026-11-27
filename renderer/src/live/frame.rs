@@ -179,6 +179,7 @@ impl LiveCore {
         let (e, b) = (&self.sc.tables, &mut self.sc.base);
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref()), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         self.sc.up.heap.write(&self.g.queue, Table::Emitters, 0, bytemuck::cast_slice(&em));
+        // (The CPU's copy: the kernel reads the total from the table's header, `emitter_cdf`.)
         b.misc[1] = total;
         b.emit_power[0] = power;
     }
