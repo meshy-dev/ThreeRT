@@ -206,6 +206,52 @@ export class Vector3 {
     const tz = 2 * (qx * vy - qy * vx);
     return this.set(vx + qw * tx + qy * tz - qz * ty, vy + qw * ty + qz * tx - qx * tz, vz + qw * tz + qx * ty - qy * tx);
   }
+  applyEuler(euler: Euler): this {
+    return this.applyQuaternion(_vectorQuaternion.setFromEuler(euler, false));
+  }
+  /** Rotates about a normalized axis by an angle in radians. */
+  applyAxisAngle(axis: Vector3, angle: number): this {
+    return this.applyQuaternion(_vectorQuaternion.setFromAxisAngle(axis, angle));
+  }
+  projectOnVector(v: Vector3): this {
+    const denominator = v.lengthSq();
+    if (denominator === 0) return this.set(0, 0, 0);
+    const scalar = v.dot(this) / denominator;
+    return this.set(v.x * scalar, v.y * scalar, v.z * scalar);
+  }
+  /** Removes the component along the plane's normal (the normal need not be normalized). */
+  projectOnPlane(planeNormal: Vector3): this {
+    const denominator = planeNormal.lengthSq();
+    if (denominator === 0) return this;
+    const scalar = planeNormal.dot(this) / denominator;
+    return this.set(this.x - planeNormal.x * scalar, this.y - planeNormal.y * scalar, this.z - planeNormal.z * scalar);
+  }
+  /** Reflects off a plane with the given normalized normal. */
+  reflect(normal: Vector3): this {
+    const d = 2 * this.dot(normal);
+    return this.set(this.x - normal.x * d, this.y - normal.y * d, this.z - normal.z * d);
+  }
+  setFromMatrixColumn(m: Matrix4, index: number): this {
+    return this.fromArray(m.elements, index * 4);
+  }
+  setFromEuler(e: Euler): this {
+    return this.set(e.x, e.y, e.z);
+  }
+  setFromSpherical(s: Spherical): this {
+    return this.setFromSphericalCoords(s.radius, s.phi, s.theta);
+  }
+  /** The point at `radius`, polar angle `phi` from +Y and azimuth `theta` around Y from +Z (three.js). */
+  setFromSphericalCoords(radius: number, phi: number, theta: number): this {
+    const sinPhiRadius = Math.sin(phi) * radius;
+    return this.set(sinPhiRadius * Math.sin(theta), Math.cos(phi) * radius, sinPhiRadius * Math.cos(theta));
+  }
+  setFromCylindrical(c: Cylindrical): this {
+    return this.setFromCylindricalCoords(c.radius, c.theta, c.y);
+  }
+  /** The point at `radius` from the Y axis, azimuth `theta` from +Z, height `y` (three.js). */
+  setFromCylindricalCoords(radius: number, theta: number, y: number): this {
+    return this.set(radius * Math.sin(theta), y, radius * Math.cos(theta));
+  }
   setFromMatrixPosition(m: Matrix4): this {
     return this.set(m.elements[12], m.elements[13], m.elements[14]);
   }
@@ -423,6 +469,9 @@ export class Quaternion {
     return this.set(a[o], a[o + 1], a[o + 2], a[o + 3]);
   }
 }
+
+/** Scratch for Vector3.applyEuler / applyAxisAngle. */
+const _vectorQuaternion = new Quaternion();
 
 export type EulerOrder = "XYZ" | "YXZ" | "ZXY" | "ZYX" | "YZX" | "XZY";
 
@@ -1819,6 +1868,83 @@ export const MathUtils = {
     return Math.max(value / normalizationScale(array), -1);
   },
 };
+
+/** Spherical coordinates: `phi` is the polar angle from +Y, `theta` the azimuth around Y from +Z (three.js r187). */
+export class Spherical {
+  radius: number;
+  phi: number;
+  theta: number;
+  constructor(radius = 1, phi = 0, theta = 0) {
+    this.radius = radius;
+    this.phi = phi;
+    this.theta = theta;
+  }
+  set(radius: number, phi: number, theta: number): this {
+    this.radius = radius;
+    this.phi = phi;
+    this.theta = theta;
+    return this;
+  }
+  copy(other: Spherical): this {
+    return this.set(other.radius, other.phi, other.theta);
+  }
+  clone(): Spherical {
+    return new Spherical(this.radius, this.phi, this.theta);
+  }
+  /** Keep `phi` off the poles, where `theta` is undefined (three.js's 1e-6). */
+  makeSafe(): this {
+    const EPS = 0.000001;
+    this.phi = Math.max(EPS, Math.min(Math.PI - EPS, this.phi));
+    return this;
+  }
+  setFromVector3(v: Vector3): this {
+    return this.setFromCartesianCoords(v.x, v.y, v.z);
+  }
+  setFromCartesianCoords(x: number, y: number, z: number): this {
+    this.radius = Math.sqrt(x * x + y * y + z * z);
+    if (this.radius === 0) {
+      this.theta = 0;
+      this.phi = 0;
+    } else {
+      this.theta = Math.atan2(x, z);
+      this.phi = Math.acos(Math.max(-1, Math.min(1, y / this.radius)));
+    }
+    return this;
+  }
+}
+
+/** Cylindrical coordinates around the Y axis: `theta` is the azimuth from +Z (three.js r187). */
+export class Cylindrical {
+  radius: number;
+  theta: number;
+  y: number;
+  constructor(radius = 1, theta = 0, y = 0) {
+    this.radius = radius;
+    this.theta = theta;
+    this.y = y;
+  }
+  set(radius: number, theta: number, y: number): this {
+    this.radius = radius;
+    this.theta = theta;
+    this.y = y;
+    return this;
+  }
+  copy(other: Cylindrical): this {
+    return this.set(other.radius, other.theta, other.y);
+  }
+  clone(): Cylindrical {
+    return new Cylindrical(this.radius, this.theta, this.y);
+  }
+  setFromVector3(v: Vector3): this {
+    return this.setFromCartesianCoords(v.x, v.y, v.z);
+  }
+  setFromCartesianCoords(x: number, y: number, z: number): this {
+    this.radius = Math.sqrt(x * x + z * z);
+    this.theta = Math.atan2(x, z);
+    this.y = y;
+    return this;
+  }
+}
 
 function normalizationScale(array: ArrayLike<number>): number {
   switch (array.constructor) {
