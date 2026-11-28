@@ -478,16 +478,17 @@ pub struct GpuTriAttr {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMaterial {
-    pub base_color: [f32; 4], // rgb, opacity
-    pub emissive: [f32; 4],   // rgb nits
-    pub params: [f32; 4],     // metallic, roughness, specular, normal scale
-    pub tex0: [i32; 4],       // base, normal, roughness(G), metalness(B)
-    pub tex1: [i32; 4],       // emissive, occlusion(R), flags, material function + 1 (0 = none)
-    pub uv: [f32; 4],         // uv repeat xy, transmission texture (R) + 1 (0 = none; glTF), 1 = it reads vertex colours
-    pub uv2: [f32; 4],        // uv offset xy, -, alpha cutoff (0 = opaque)
-    pub layer: [f32; 4],      // transmission (glass), index of refraction, clearcoat, clearcoat roughness
-    pub mp: [[f32; 4]; 8],    // material function parameters
-    pub mt: [i32; 8],         // material function texture slots (-1 none)
+    pub base_color: [f32; 4],  // rgb, opacity
+    pub emissive: [f32; 4],    // rgb nits
+    pub params: [f32; 4],      // metallic, roughness, specular, normal scale
+    pub tex0: [i32; 4],        // base, normal, roughness(G), metalness(B)
+    pub tex1: [i32; 4],        // emissive, occlusion(R), flags, material function + 1 (0 = none)
+    pub uv: [f32; 4],          // uv repeat xy, transmission texture (R) + 1 (0 = none; glTF), 1 = it reads vertex colours
+    pub uv2: [f32; 4],         // uv offset xy, -, alpha cutoff (0 = opaque)
+    pub layer: [f32; 4],       // transmission (glass), index of refraction, clearcoat, clearcoat roughness
+    pub emissive_uv: [f32; 4], // emissive uv repeat xy, offset xy (KHR_texture_transform / emissiveMap)
+    pub mp: [[f32; 4]; 8],     // material function parameters
+    pub mt: [i32; 8],          // material function texture slots (-1 none)
 }
 
 #[repr(C)]
@@ -1246,6 +1247,9 @@ pub fn build_material(id: u32, m: &desc::Material, textures: &HashMap<u32, world
     let first_tex = [m.map, m.normal_map, m.roughness_map, m.emissive_map].into_iter().flatten().find_map(|t| textures.get(&t));
     let repeat = first_tex.map(|t| t.repeat).unwrap_or([1.0, 1.0]);
     let offset = first_tex.map(|t| t.offset).unwrap_or([0.0, 0.0]);
+    let emissive_tex = m.emissive_map.and_then(|t| textures.get(&t));
+    let e_repeat = emissive_tex.map(|t| t.repeat).unwrap_or(repeat);
+    let e_offset = emissive_tex.map(|t| t.offset).unwrap_or(offset);
     let mut gm = GpuMaterial {
         base_color: [m.color[0], m.color[1], m.color[2], m.opacity],
         emissive: [m.emissive[0] * m.emissive_intensity, m.emissive[1] * m.emissive_intensity, m.emissive[2] * m.emissive_intensity, 0.0],
@@ -1255,6 +1259,7 @@ pub fn build_material(id: u32, m: &desc::Material, textures: &HashMap<u32, world
         uv: [repeat[0], repeat[1], slot(&m.transmission_map, false)? as f32 + 1.0, if m.vertex_colors { 1.0 } else { 0.0 }],
         uv2: [offset[0], offset[1], 0.0, m.alpha_test.unwrap_or(0.0)],
         layer: [m.transmission.unwrap_or(0.0).clamp(0.0, 1.0), m.ior.unwrap_or(1.5).max(1.0), m.clearcoat.unwrap_or(0.0).clamp(0.0, 1.0), m.clearcoat_roughness.unwrap_or(0.0).clamp(0.0, 1.0)],
+        emissive_uv: [e_repeat[0], e_repeat[1], e_offset[0], e_offset[1]],
         mp: [[0.0; 4]; 8],
         mt: [-1; 8],
     };
@@ -1376,6 +1381,7 @@ pub fn card_material(color: [f32; 3], intensity: f32) -> GpuMaterial {
         tex0: [-1; 4],
         tex1: [-1, -1, MAT_EMITTER_CARD, 0],
         uv: [1.0, 1.0, 0.0, 0.0],
+        emissive_uv: [1.0, 1.0, 0.0, 0.0],
         ..Default::default()
     }
 }
@@ -2166,7 +2172,7 @@ pub fn aerial_params(sky: &Sky) -> [f32; 4] {
 #[allow(clippy::type_complexity)]
 pub fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], key: &str, texture: &mut dyn FnMut((String, bool), bool, &mut dyn FnMut() -> Result<Arc<image::RgbaImage>>) -> Result<i32>, converted: &HashMap<String, Arc<image::RgbaImage>>) -> Result<GpuMaterial> {
     let Some(gm) = gm else {
-        return Ok(GpuMaterial { base_color: [1.0, 1.0, 1.0, 1.0], params: [0.0, 1.0, 0.5, 1.0], tex0: [-1; 4], tex1: [-1, -1, 0, 0], uv: [1.0, 1.0, 0.0, 0.0], ..Default::default() });
+        return Ok(GpuMaterial { base_color: [1.0, 1.0, 1.0, 1.0], params: [0.0, 1.0, 0.5, 1.0], tex0: [-1; 4], tex1: [-1, -1, 0, 0], uv: [1.0, 1.0, 0.0, 0.0], emissive_uv: [1.0, 1.0, 0.0, 0.0], ..Default::default() });
     };
     let mut tex = |t: Option<gltf::texture::Texture>, srgb: bool| -> Result<i32> {
         let Some(t) = t else { return Ok(-1) };
@@ -2186,15 +2192,30 @@ pub fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], k
     let unlit = gm.extension_value("KHR_materials_unlit").is_some();
     let base_color = if unlit && e.iter().any(|&c| c > 0.0) { [e[0] * strength, e[1] * strength, e[2] * strength, 1.0] } else { pbr.base_color_factor() };
     let (e, strength) = if unlit { ([0.0; 3], 0.0) } else { (e, strength) };
+    // Base UV transform (falling back to metallicRoughness if baseColor is absent) is shared across base, normal,
+    // occlusion, and metallic-roughness maps; textureInfo.texCoord / transform.texCoord overrides are not handled yet.
+    let base_tf = pbr
+        .base_color_texture()
+        .and_then(|t| t.texture_transform())
+        .or_else(|| pbr.metallic_roughness_texture().and_then(|t| t.texture_transform()));
+    if let Some(t) = base_tf.as_ref().filter(|t| t.rotation() != 0.0) {
+        eprintln!("gltf_material ({key}): ignoring non-zero base KHR_texture_transform rotation ({})", t.rotation());
+    }
+    let (base_scale, base_offset) = base_tf.map(|t| (t.scale(), t.offset())).unwrap_or(([1.0, 1.0], [0.0, 0.0]));
+    let emissive_tf = gm.emissive_texture().and_then(|t| t.texture_transform());
+    if let Some(t) = emissive_tf.as_ref().filter(|t| t.rotation() != 0.0) {
+        eprintln!("gltf_material ({key}): ignoring non-zero emissive KHR_texture_transform rotation ({})", t.rotation());
+    }
+    let (em_scale, em_offset) = emissive_tf.map(|t| (t.scale(), t.offset())).unwrap_or(([1.0, 1.0], [0.0, 0.0]));
     Ok(GpuMaterial {
         base_color,
         emissive: [e[0] * strength, e[1] * strength, e[2] * strength, 0.0],
         params: [pbr.metallic_factor(), pbr.roughness_factor(), 0.5, gm.normal_texture().map(|n| n.scale()).unwrap_or(1.0)],
         tex0: [tex(pbr.base_color_texture().map(|t| t.texture()), true)?, tex(gm.normal_texture().map(|t| t.texture()), false)?, mr, mr],
         tex1: [tex(gm.emissive_texture().map(|t| t.texture()), true)?, tex(gm.occlusion_texture().map(|t| t.texture()), false)?, if unlit { MAT_UNLIT } else if gm.double_sided() { MAT_DOUBLE_SIDED } else { 0 }, 0],
-        uv: [1.0, 1.0, gm.transmission().and_then(|t| t.transmission_texture()).map_or(Ok(-1), |t| tex(Some(t.texture()), false))? as f32 + 1.0, 0.0],
+        uv: [base_scale[0], base_scale[1], gm.transmission().and_then(|t| t.transmission_texture()).map_or(Ok(-1), |t| tex(Some(t.texture()), false))? as f32 + 1.0, 0.0],
         // glTF MASK (and BLEND, approximated) -> alpha cutout
-        uv2: [0.0, 0.0, 0.0, match gm.alpha_mode() { gltf::material::AlphaMode::Opaque => 0.0, gltf::material::AlphaMode::Mask => gm.alpha_cutoff().unwrap_or(0.5), gltf::material::AlphaMode::Blend => 0.5 }],
+        uv2: [base_offset[0], base_offset[1], 0.0, match gm.alpha_mode() { gltf::material::AlphaMode::Opaque => 0.0, gltf::material::AlphaMode::Mask => gm.alpha_cutoff().unwrap_or(0.5), gltf::material::AlphaMode::Blend => 0.5 }],
         // KHR_materials_transmission / _ior / _clearcoat factors (the transmission texture in uv.z; the clearcoat
         // textures are not read yet).
         layer: [
@@ -2203,6 +2224,7 @@ pub fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], k
             clearcoat("clearcoatFactor"),
             clearcoat("clearcoatRoughnessFactor"),
         ],
+        emissive_uv: [em_scale[0], em_scale[1], em_offset[0], em_offset[1]],
         ..Default::default()
     })
 }
@@ -3114,5 +3136,34 @@ mod instance_tests {
         // Hidden by their own `visible`, they keep a place while there is room after those shown (shown in place).
         let b = build_with(MAX_MEDIA as u32 - 2, 4).unwrap();
         assert_eq!((b.media.len(), b.media.iter().filter(|m| m.a[1] == MEDIUM_HIDDEN).count()), (MAX_MEDIA, 2));
+    }
+
+    #[test]
+    fn gltf_emissive_texture_transform_sets_emissive_uv_only() {
+        let json = br#"{
+            "asset": { "version": "2.0" },
+            "images": [{ "mimeType": "image/png" }],
+            "textures": [{ "source": 0 }],
+            "materials": [{
+                "emissiveFactor": [1.0, 1.0, 1.0],
+                "emissiveTexture": {
+                    "index": 0,
+                    "extensions": {
+                        "KHR_texture_transform": {
+                            "offset": [0.25, 0.5],
+                            "scale": [2.0, 3.0]
+                        }
+                    }
+                }
+            }]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json).unwrap();
+        let mat = gltf.document.materials().next().unwrap();
+        let img = gltf::image::Data { pixels: vec![255, 255, 255, 255], format: gltf::image::Format::R8G8B8A8, width: 1, height: 1 };
+        let mut tex_idx = 0i32;
+        let gpu = gltf_material(Some(mat), &[img], "test", &mut |_, _, _| { let id = tex_idx; tex_idx += 1; Ok(id) }, &HashMap::new()).unwrap();
+        assert_eq!(gpu.emissive_uv, [2.0, 3.0, 0.25, 0.5]);
+        assert_eq!(gpu.uv, [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(gpu.uv2[..2], [0.0, 0.0]);
     }
 }

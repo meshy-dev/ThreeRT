@@ -133,7 +133,7 @@ struct Node { bmin: vec3<f32>, left_or_first: u32, bmax: vec3<f32>, count: u32 }
 // See scene::GpuMaterial for the field layout.
 struct Material {
     base_color: vec4<f32>, emissive: vec4<f32>, params: vec4<f32>, tex0: vec4<i32>, tex1: vec4<i32>, uv: vec4<f32>,
-    uv2: vec4<f32>, layer: vec4<f32>, mp: array<vec4<f32>, 8>, mt: array<i32, 8>,
+    uv2: vec4<f32>, layer: vec4<f32>, emissive_uv: vec4<f32>, mp: array<vec4<f32>, 8>, mt: array<i32, 8>,
 };
 // See scene::GpuLight (x = volumetric scattering scale, specular scale, rect barn-door cosine, -).
 struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>, x: vec4<f32> };
@@ -218,16 +218,16 @@ fn emitter_tri_at(i: u32) -> EmitterTri {
     // wrong (gpu.rs `GpuOptions::table_views`: Android): from the buffer whole, a record made of its vec4s (their
     // counts: the tests hold them to the renderer's records). Slower than the views below where it was measured
     // (docs/RUNTIME.md "The scene's tables"): an offset from the parameters at every read, the records' assembly.
-    const MATERIAL_VEC4: u32 = 18u;
+    const MATERIAL_VEC4: u32 = 19u;
     const LIGHT_VEC4: u32 = 5u;
     const INSTANCE_VEC4: u32 = 10u;
     const MEDIUM_VEC4: u32 = 14u;
     fn material_at(i: u32) -> Material {
         let b = P.table_first[0].y + i * MATERIAL_VEC4;
-        let t0 = table_i(b + 16u);
-        let t1 = table_i(b + 17u);
-        return Material(table_f(b), table_f(b + 1u), table_f(b + 2u), table_i(b + 3u), table_i(b + 4u), table_f(b + 5u), table_f(b + 6u), table_f(b + 7u),
-            array<vec4<f32>, 8>(table_f(b + 8u), table_f(b + 9u), table_f(b + 10u), table_f(b + 11u), table_f(b + 12u), table_f(b + 13u), table_f(b + 14u), table_f(b + 15u)),
+        let t0 = table_i(b + 17u);
+        let t1 = table_i(b + 18u);
+        return Material(table_f(b), table_f(b + 1u), table_f(b + 2u), table_i(b + 3u), table_i(b + 4u), table_f(b + 5u), table_f(b + 6u), table_f(b + 7u), table_f(b + 8u),
+            array<vec4<f32>, 8>(table_f(b + 9u), table_f(b + 10u), table_f(b + 11u), table_f(b + 12u), table_f(b + 13u), table_f(b + 14u), table_f(b + 15u), table_f(b + 16u)),
             array<i32, 8>(t0.x, t0.y, t0.z, t0.w, t1.x, t1.y, t1.z, t1.w));
     }
     fn light_at(i: u32) -> Light {
@@ -1116,9 +1116,17 @@ fn tex(id: i32, uv: vec2<f32>, lod: f32) -> vec4<f32> {
     return tex_level(id, uv, lod + 0.5 * log2(b.z * b.w));
 }
 
-fn mesh_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
+fn raw_uv(a: TriAttr, u: f32, v: f32) -> vec2<f32> {
     let w = 1.0 - u - v;
-    return (vec2<f32>(a.n0.w, a.n1.w) * w + vec2<f32>(a.n2.w, a.uv.x) * u + a.uv.yz * v) * m.uv.xy + m.uv2.xy;
+    return vec2<f32>(a.n0.w, a.n1.w) * w + vec2<f32>(a.n2.w, a.uv.x) * u + a.uv.yz * v;
+}
+
+fn mesh_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
+    return raw_uv(a, u, v) * m.uv.xy + m.uv2.xy;
+}
+
+fn emissive_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
+    return raw_uv(a, u, v) * m.emissive_uv.xy + m.emissive_uv.zw;
 }
 
 // The square of a triangle's texel density (texture-UV units per metre, incl. material repeat) as the two it is the
@@ -1138,6 +1146,14 @@ fn mesh_density(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> vec2<f
 // The level a texture is read at, less its own size's: half the log of the density times a footprint's square (m^2)
 // over `over` (1: nothing more).
 fn mesh_lod(density: vec2<f32>, footprint2: f32, over: f32) -> f32 { return 0.5 * log2(max(density.x * footprint2 / (density.y * over), 1e-30)); }
+
+// The emissive map's density: the mesh density's UV area, with the emissive UV repeat (its own scale, from
+// KHR_texture_transform or its texture's tiling) in place of the mesh's.
+fn emissive_density(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> vec2<f32> {
+    let d = mesh_density(e1, e2, a, m);
+    let rep = max(abs(m.emissive_uv.x * m.emissive_uv.y), 1e-12) / max(abs(m.uv.x * m.uv.y), 1e-12);
+    return vec2<f32>(d.x * rep, d.y);
+}
 
 // ------------------------------------------------------------------------------------------------
 // Material functions: scene-supplied WGSL (like a UE Custom-HLSL material), docs/MATERIAL_FUNCTIONS.md.
@@ -1362,7 +1378,8 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         if (m.tex0.z >= 0) { rough *= tex(m.tex0.z, uv, lod).g; }
         if (m.tex0.w >= 0) { metal *= tex(m.tex0.w, uv, lod).b; }
     }
-    s.emissive = emission(m, uv, lod) * obj_power(a);
+    let em_lod = mesh_lod(emissive_density(e1, e2, a, m), fp * fp, max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
+    s.emissive = emission(m, emissive_uv(a, m, h.u, h.v), em_lod) * obj_power(a);
     // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.
     if (has(F_UNLIT) && m.tex1.z == MAT_UNLIT) {
         s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);
@@ -2271,7 +2288,7 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     let m = material_at(material_of(a, em.inst));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
-    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(mesh_density(em.e1, em.e2, a, m), 0.0025, 1.0)) * pw;
+    var le = emission(m, emissive_uv(a, m, b1, b2), mesh_lod(emissive_density(em.e1, em.e2, a, m), 0.0025, 1.0)) * pw;
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
